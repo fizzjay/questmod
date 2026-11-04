@@ -1,0 +1,174 @@
+QUESTMODS PROJECT HANDOFF
+========================
+Prepared from the project conversation and the source files available in the workspace.
+Date: 2026-11-04
+
+PURPOSE OF THIS FILE
+--------------------
+This is a handoff for a developer or future AI assistant working on this project in GitHub or another conversation. It records the user's goals, environment, working features, troubleshooting history, known limitations, and current untested work. The actual source files remain the authoritative implementation. The original full conversation and test logs are not included here.
+
+CURRENT STATUS — READ THIS FIRST
+--------------------------------
+Latest source: Questmods_1.9.6.cs
+Latest version actually tested by the user: Questmods_1.9.5.cs
+Status of 1.9.6: produced and statically checked for balanced delimiters only. It has NOT been compiled by the assistant or tested on the Quest. Do not describe it as verified or working on all slots.
+
+The user reported that 1.9.5 worked on some slots, but not all. Its log confirms the fallback was invoked on some StockDock targets, but the observed line said Interacting=True and the original referenced pickup still had IsDocked=True. That line alone does NOT prove that pickup was undocked, that a particular item was grabbed, or that any change persisted server-side. The user's report of partial success is valid, but cannot be assigned to a particular logged line without additional evidence.
+
+Version 1.9.6 attempts to address two observed limitations: the game's ten-collider overlap buffer can fill, and a dock plus its own pickup can appear as two different overlapping interactables. It also logs the object actually held after confirmation. Multiple unrelated targets still result in a safe refusal to guess. Some slots may have no collider overlap, use other types, be blocked by native checks, or be server-authoritative.
+
+Important: versions prior to 1.9.4 attempted to undock before the normal grab. The user's later reference source showed that pre-undocking can interfere with PickupDock.CheckForward and dock-specific grab behavior. Do not reintroduce it blindly. Versions 1.9.4–1.9.6 use the game's confirmation/forwarding/interaction path and let the native Pickup.Interact handle Undock where appropriate. This is a deliberate change from the user's initial Undock-before-StartInteract example, not proof every slot will work.
+
+PROJECT GOAL AND USER REQUIREMENTS
+----------------------------------
+- Build a CLIENT-SIDE IL2CPP MelonLoader mod for A Township Tale on Quest, integrated into one complete source file rather than a separate test mod.
+- The user reports having authorization from the game owner to mod the shut-down game.
+- The user's practical reason for Grabby Hands is to allow moderators to grab unwanted items in shop slots and other supported slots. The user wants it useful for all slots, not just shop-specific names. Do not claim universal support until verified.
+- Main radial wheel must retain the game's Dev Tools 1 and Dev Tools 2 entries.
+- A native nested radial wheel named "Quest Mods" contains the working Fly/debug-movement action and a DIRECT "Grabby Hands" ON/OFF toggle. Do not add duplicated Dev Tools pages inside Quest Mods. Do not turn Grabby Hands into another submenu.
+- Use "mod" rather than "cheat" in user-facing naming. Historical files and the current installed DLL may still be named Questcheats for continuity, but current source namespace/labels use QuestMods/Quest Mods.
+- Debug movement must be manual only: do not turn it on when joining a scene, and do not change normal movement speed except when the user activates the existing game action or the explicit mod toggle. Preserve the known-working native debug toggle.
+- The wheel/menu is client-side. Client-side developer flags or item changes do not grant server permissions or guarantee server-side persistence.
+- Grabby Hands defaults OFF and turns OFF on scene load. Restrict operations to the verified local interactor and intended target; do not indiscriminately undock overlap lists or modify other players' interactions/owned slots.
+- Continue to provide COMPLETE updated source rather than partial snippets. Preserve the working wheel when iterating on Grabby Hands.
+- The user has limited time. Integrate useful diagnostics in the existing mod and avoid requiring unnecessary decompilation or a separate mod. Ask for focused logs when needed.
+- The user cannot currently supply their complete Quest project/reference DLLs. In particular, do not introduce a compile-time reference to Il2CppInterop.Runtime.dll as a new requirement if avoidable. Runtime reflection is used extensively for this reason.
+- The Mono/decompiled classes supplied by the user are REFERENCE MATERIAL. Quest is IL2CPP; Mono implementation details and server reference assemblies do not by themselves prove Quest behavior.
+
+TARGET ENVIRONMENT OBSERVED IN USER LOGS
+----------------------------------------
+Game: Att_Quest / A Township Tale
+Game version: main-1.7.2.1.42203
+Unity: 2020.3.23f1
+Platform reported by logs: Android 14, IL2CPP, x64
+MelonLoader: v0.6.5 Open-Beta, runtime net8
+Il2CppAssemblyGenerator reported Il2CppInterop 1.4.6+5c0c44bfc31bc50023fb7426fc4a32b2086f672b
+Game package: com.Alta.ATownshipTale
+MelonLoader mod folder: /storage/emulated/0/Android/data/com.Alta.ATownshipTale/files/MelonLoader/com.Alta.ATownshipTale/Mods/
+Observed mod assembly file name: Questcheats.dll; MelonInfo displays QuestMods and its source version.
+
+Other loaded components included QuestLemonFixes, TavernEssentials.Quest, HydrateOrDiedrate, QuestVoice, QuestForest.Quest, and QuestLogin. They may interact with the same game, but the logs do not establish that they caused the Grabby Hands problems.
+
+Repeated loader errors appeared before the mod loaded: DotnetAssemblyLoadContextFix reported a NullReferenceException; Il2CppInteropFixes.Install reported MissingMethodException for RegisterTypeOptions.set_LogSuccess(bool). This may indicate a loader/interop version mismatch, but its effect on the mod is NOT proven. The mod loaded and hooks did fire despite these messages. QuestVoice also warned about missing Concentus while reporting its codec self-test passed; that warning is separate from the evidence about Grabby Hands.
+
+WORKSPACE / FILES TO ADD TO THE REPOSITORY
+------------------------------------------
+These source files were present in the shared workspace when this handoff was made. Add the latest source itself to GitHub; this text is not a substitute for code. There was no project/solution file or copy of the user's Quest reference DLLs in this workspace.
+
+Questmods_1.9.6.cs — latest complete source; uncompiled and untested on Quest. Best starting point for the next controlled test, but preserve 1.9.5 as a known partial-success fallback.
+Questmods_1.9.5.cs — latest user-tested source; user reports some slots work, not all. Keeps the working wheel.
+Questmods_1.9.4.cs — earlier slot fallback; its guard skipped fallback whenever grab assist was active OR its state could not be determined. Superseded.
+Questmods_1.9.3.cs — diagnostic experiment; its ForwardTo handling assumed a single target, but the user's later reference indicates ForwardTo is a collection. Do not rely on that diagnostic interpretation.
+Questmods_1.9.2.cs — earlier attempt and StartInteract diagnostics. No confirmed general fix.
+Questmods_1.9.1.cs — improved exact local-hand checks; pre-StartInteract undock approach remained experimental.
+Questmods_1.9.0.cs — direct wheel toggle worked, but its local-hand ownership check rejected observed StartInteract calls.
+Questcheats_1.6.3.cs — important known-working rollback for the developer wheel and manual debug-movement toggle, before Grabby Hands was added.
+Questcheats_1.4.1.cs through Questcheats_1.8.1.cs — historical complete experiments. Several failed or crashed; see history below.
+
+The temporary server reference stub used for metadata inspection is NOT a Quest reference DLL and need not be included. The user's decompiled Mono snippets were shared in chat; their relevant behavior is summarized below. The original full snippets and full logs are not stored as project files here.
+
+Suggested repository practice: keep the latest complete source, this handoff, and optionally a clearly labeled 1.9.5 rollback. Avoid committing player identifiers, private keys, login tokens, full unredacted logs, or private server details. Check rights and repository visibility before sharing game assemblies or decompiled proprietary material. This handoff intentionally omits user identifiers and private paths beyond generic installation locations.
+
+HOW THE CURRENT SOURCE IS ORGANIZED
+-----------------------------------
+The namespace is QuestMods and the entry point is QuestMods.Mod : MelonMod. Most integration is reflection-based to accommodate Quest IL2CPP proxy types and the user's reference limitations.
+
+1. Startup and developer flags
+   - OnInitializeMelon patches QuickAccessMenuAction initialization and selected getters using Harmony, then sets up diagnostics and the developer-wheel bridge.
+   - InitializeForPlayer prefixes force the local developer initialization flag true; IsDev, UserRoles.IsDeveloper, and IsIgnored getter patches also attempt to expose developer actions. These are client-side changes and cannot grant server-enforced authority. Broad IsIgnored overrides are experimental and may expose incompatible actions.
+   - Harmony registration does not prove a native IL2CPP call will reach a patch. Runtime log evidence is necessary.
+   - Avoid starting new risky NestingMenuAction.Run detours during application startup: previous experimental versions crashed, although the exact cause was not conclusively established.
+
+2. Developer and Quest Mods wheels
+   - DevWheelBridge waits until in-game, reflects over QuickAccessMenuController runtime objects, and targets owned controller extension clones, not prefab assets. It reads the normal and developer arrays, appends missing Dev Tools 1/2 to the root wheel, and prepares Quest Mods.
+   - QuestModsMenu creates a native nested menu by cloning existing game action assets. It converts the local Player.Current proxy to Il2Cpp.Player when necessary using reflected interop TryCast/Cast; an IPlayer proxy cannot simply be passed to InitializeForPlayer.
+   - The Fly/debug-movement child is cloned from the native ToggleDebugMovementMenuAction. It is initialized for the local player but not run or automatically enabled.
+   - Grabby Hands is presented as a direct toggle. It uses a cloned nesting action and a deferred Harmony prefix on SpawnNestedBubbles; it suppresses nested spawning only for the verified custom clone and queues a toggle request for the update loop. If the hook is bypassed, fallback detection can mark Grabby Hands unavailable rather than pretending the toggle worked.
+   - Two local wheel controllers and their actual Controller/Interactor IDs are registered. The mod uses exact identity and IsLocal checks rather than object-name or transform-distance guesses.
+
+3. Debug movement and diagnostics
+   - DebugStateMonitor reads local IsDebugMovement and logs changes. It does not enable it. The native action itself controls the movement toggle when selected.
+   - TabletProbe and speed/developer diagnostics are integrated into the existing mod. Some are verbose, but they do not implement a separate tablet/board.
+   - Do not reintroduce the earlier dual validity/active getter hook design. In 1.6.1 the validity probe hit the active hook and the button remained red/unselectable; native method sharing or patch interference was plausible but not proven.
+
+4. Grabby Hands in 1.9.6
+   - The toggle defaults OFF. SceneLoaded clears state and disables it. The wheel hook is deferred until in-game; grab/slot hooks are installed when first enabled, not at application startup.
+   - StartInteract interception is diagnostic only in 1.9.4–1.9.6. It does not pre-undock.
+   - BeforeCheckHold is an experimental Harmony prefix on Interactor.CheckHold(PlayerInput), the local grab input path identified in the user-supplied Mono source. The Quest log for 1.9.5 shows this hook fired.
+   - Checks include enabled state, verified exact local interactor/controller identity, IsLocal, and not already interacting or toggle-holding. If verification fails, normal game behavior is allowed.
+   - It calls the game's SelectBestFromCurrent. If that returns a target, normal grab proceeds; the fallback does not force a different one. This selector does perform game scoring and may update game state, so calling it before the original CheckHold is not purely read-only.
+   - If there is no selected target, the fallback inspects colliders returned by GetColliderOverlap and maps them with ColliderExtension.GetComponentIncludingBody<Interactable>. An unambiguous candidate must resolve to a PickupDock, or in 1.9.6 a directly touched Pickup that is verified to be that dock's current DockedPickup. A dock and its own current pickup can count as one logical target. Unrelated overlaps or different slots are rejected rather than guessed.
+   - If the game buffer returns 10 colliders, 1.9.6 attempts a reflected Physics.OverlapCapsule using the same trigger positions, collision mask, radius/scale, and default trigger policy from the supplied reference code. It refuses partial/oversized results or failure to resolve required runtime members. This full-overlap path is UNTESTED on Quest.
+   - It verifies the slot is active, its contents and quantity are readable, the pickup reports IsDocked, the pickup points back to that slot, and player ownership matches when the slot is owned. It then invokes the native GetConfirmationOnInteractable on the identified target. The game's forwarding/interaction path is expected to undock if allowed.
+   - The mod does not disable grab assist. With the toggle ON, its fallback may prioritize one nearby slot over a more distant grab-assist target if direct native selection found none.
+   - After confirmation, 1.9.6 records whether the held object matches the original pickup, the slot, or another object, plus whether the original pickup remains docked and whether the slot now contains the original or a different pickup. These diagnostics are not proof of server persistence.
+   - If confirmation throws after invocation starts, the prefix avoids immediately issuing a second native grab that might duplicate side effects. Otherwise failures fall back to ordinary game handling. Some reflection/member names and IL2CPP behavior remain unverified.
+
+WHAT THE USER-SUPPLIED GAME SOURCE REVEALED
+------------------------------------------
+These are facts about the supplied Mono reference; check Quest compatibility before relying on exact implementation details.
+
+Interactor:
+- CheckHold(PlayerInput) is subscribed to Interact and HardInteract action start events. It calls OnStartInteractionAttempt, checks local/held state, then may use grab assist or SelectBest(GetColliderOverlap(), out target), and calls GetConfirmationOnInteractable.
+- OnStartInteractionAttempt primarily updates the interaction timeout when timing-out is enabled. Its name alone did not establish a generally useful target callback, and the 1.9.2 run did not log it despite hook registration.
+- SelectBestFromCurrent calls GetColliderOverlap and SelectBest. SelectBest builds OverlapInteractables from interactable colliders, applies IsInteractable/channels, and asks each target to AssessInteraction. It is not guaranteed to select a non-interactable or score-rejected shop item.
+- The reference collider overlap uses Physics.OverlapCapsuleNonAlloc with an internal 10-element collider array, last physics trigger position, current trigger position, scaled radius and collision mask.
+- GetConfirmationOnInteractable may perform forwarding and ownership/interaction checks before calling StartInteract or waiting for confirmation. StartInteract itself also performs CheckForward and CheckInteractAllowedAndReplace before Interact.
+- StartInteract arguments are (Interactable, isFromNetwork, isForced, isForcingHold). Remote/network interactions must not be treated as local user grabs.
+
+PickupDock:
+- A PickupDock is itself an Interactable and may expose HasDockedPickup, DockedPickup, QuantityStored, IsOwnedByPlayer and PlayerController.
+- Its CheckForward can return the docked pickup, but also contains ownership/quantity checks and mutates state including forwarding/clientDocked. Do not call it as if it were a harmless getter.
+- AssessScore can reject a local grab if RawInput.HardGrab is false. Different slots/settings may behave differently.
+- A docked Pickup can be marked IsInteractable=false; the slot may be the actual selectable target.
+
+Pickup:
+- Pickup extends Interactable. IsDocked is based on Dock != null.
+- Pickup.Interact calls Undock(interactor, true, 1) when Dock is non-null, then performs dock-specific grab setup. Prematurely undocking can change forwarding and the isGrabbingFromDock state.
+- The original mod request used the same Undock(interactor, true, 1) pattern. The current experiment leaves this call to the native interaction path rather than calling it before forwarding.
+- ForwardTo is a collection in the supplied reference, not a single linked interactable. Do not use the 1.9.3 single-target diagnostic as a correct model.
+
+TEST HISTORY AND FAILED APPROACHES
+----------------------------------
+1.4.1: Integrated developer/menu diagnostics rather than shipping a separate probe. 1.4.2 added DevWheelBridge; user confirmed Dev Tools 1/2 showed on both controller clones.
+1.5.0: Native nesting experiment failed due to IPlayer versus Il2Cpp.Player proxy mismatch. 1.5.2 resolved this via interop casts and successfully showed the nested wheel/action listing.
+1.6.0 / 1.6.1: Cloned speed/debug action was red and unselectable; logs showed getter-hook interference (validity probe reached the active hook). Avoid repeating.
+1.6.2: Build failed because DevWheelBridge.ReadArray was private. 1.6.3 made it internal. User confirmed 1.6.3 fixed the manual movement toggle.
+1.7.0: Custom 3D Grabby board and startup hook experiment crashed. 1.7.1 deferred object creation/scanning but was not reported tested; user rejected the board approach.
+1.8.0: Native nesting-action approach with a startup Run prefix crashed as the game opened. 1.8.1 deferred the hook, but Grabby opened a submenu instead of behaving as a direct toggle. Exact startup-crash cause is unconfirmed.
+1.9.0: Direct toggle worked with deferred SpawnNestedBubbles hook; duplicate dev pages removed from Quest Mods. StartInteract callbacks were observed but the ownership gate rejected them.
+1.9.1: Ownership checks changed to exact identities, with a local PlayerController fallback and a reentry guard. User reported no effect; the log had no relevant StartInteract/undock diagnostic lines during the enabled periods, but some early returns were unlogged.
+1.9.2: Added an early-attempt diagnostic and logs before StartInteract early returns. User log showed local hand verified, two targets not readable as Pickup and one Pickup with IsDocked=False. No Undock call was seen.
+1.9.3: Added speculative target/forward diagnostics, later superseded by the user's Mono source showing ForwardTo is a collection and CheckForward has side effects. No user test result was reported.
+1.9.4: Used CheckHold and a unique PickupDock fallback through game confirmation. User's log repeatedly said 'grab assist active or state unavailable; leaving native grab alone', so the fallback never ran in those attempts.
+1.9.5: Removed that blocker. User reported some slots work but not all. Log showed CheckHold firing and several StockDock confirmations. Other attempts reported zero overlap, a unique non-PickupDock target, a saturated count of 10, or multiple interactables. Grabby was sometimes rapidly toggled ON then OFF; check toggle state when interpreting attempts.
+1.9.6: Added an experimental same-capsule expanded query for saturated buffers; permits the dock and its verified current pickup to count as one logical target; improves post-confirmation identity logging. No user test, compiler, or Quest runtime was available to validate it.
+
+LATEST USER-REPORTED LOG FACTS (1.9.5)
+----------------------------------------
+- Hooks registered after the toggle and CheckHold messages appeared; unlike mere registration, these messages show the prefix was reached during this session.
+- The fallback found a unique StockDock on several attempts, with reported quantities including 114, 8, 7 and 64. Native StartInteract was observed for StockDock. Immediately after some confirmation calls, Interacting=True while the original referenced pickup still reported IsDocked=True. Do not equate Interacting=True with an undock or a persistent removal.
+- Other attempts logged 'overlap count ... 0', a unique target that was not a PickupDock, a full buffer count of 10, and 'multiple overlapping interactables; refusing to guess'. The older log did not identify every rejected target, and it is not known which exact log line corresponds to each slot the user tried.
+- A native selection was observed for a fabric roll, Storage, an ore dispenser dock and another Dock; the fallback correctly deferred in those instances. These messages do not show whether the user succeeded or whether server state changed.
+- User observed that some slots now work and some do not. Do not tell them nothing worked; also do not claim the logs establish exactly what was removed.
+
+NEXT STEPS FOR THE NEXT DEVELOPER / ASSISTANT
+---------------------------------------------
+1. Preserve 1.9.5 as a rollback and inspect the full latest source before editing. Compile 1.9.6 with the user's existing working project and Quest IL2CPP references when available; do not assume the Mono references can build it.
+2. Have the user test one known working and one known failing authorized slot, identifying which is which and what they observed. Use a disposable item or backed-up server. Ask for only the relevant [GrabbyHands] lines plus any compile/runtime errors; do not require repeated full logs unless necessary.
+3. Check whether the expanded overlap query actually resolves UnityEngine.Physics and returns usable collider proxies on the Quest. Inspect whether the recognized target is a dock, its verified pickup, or an unrelated interactable. Zero overlap means the present collision query did not find a collider; it does not establish whether another safe target path exists.
+4. Use the new held-object/slot-content diagnostics to separate 'holding the dock', 'holding a different or replacement pickup', 'original still docked', and 'server change persisted'. Wait for game/network updates where appropriate; synchronous post-call state alone may be misleading.
+5. If multiple separate targets are in range, preserve fail-closed behavior unless a reliable, explicitly justified way to determine the user's intended target is established. Never undock every overlap or silently select another player's slot.
+6. If a slot is not a PickupDock or has unreadable DockedPickup/quantity, inspect that specific runtime object's actual type/relationship before adding support. Don't assume all shop items have the same implementation.
+7. Confirm server authority and persistence using an authorized controlled environment; a client-side menu flag or local Undock does not override server-side rules.
+8. Continue preserving Dev Tools 1/2, Quest Mods direct toggle, manual-only Fly and normal movement speed. Ship a complete source each iteration, with bounded diagnostics and honest testing status.
+
+REFERENCE MATERIAL
+------------------
+The user supplied decompiled Mono classes HandInteractor, Interactor, Alta.Inventory.PickupDock and Pickup in the conversation. They were used as design references, not as Quest compile targets.
+
+Server metadata stubs (method bodies removed; not proof of Quest runtime behavior):
+https://github.com/ChatonIsHere/att-stubs
+The Root.Township.dll server reference was inspected temporarily to identify member names and signatures. No game assembly is included in this handoff.
+
+END OF HANDOFF
