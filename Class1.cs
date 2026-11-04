@@ -1,5 +1,7 @@
-﻿// QuestMods 1.9.6 - existing Questmods mod with experimental developer wheel bridge.
+// QuestMods 1.10.0 - existing Questmods mod with experimental developer wheel bridge.
 // Experimental native 3D nested wheel, not a tablet or rectangular panel.
+// 1.10.0 adds a "Super Speed" (5x local speed) toggle beside Grabby Hands and
+// per-action bubble colours (Fly red, Grabby Hands green, Super Speed blue).
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -11,7 +13,7 @@ using Il2CppAlta.Api.DataTransferModels.Models.Shared;
 using Il2CppAlta.QuickAccessActions;
 using MelonLoader;
 
-[assembly: MelonInfo(typeof(QuestMods.Mod), "QuestMods", "1.9.6", "you")]
+[assembly: MelonInfo(typeof(QuestMods.Mod), "QuestMods", "1.10.0", "you")]
 [assembly: MelonGame(null, null)]
 
 namespace QuestMods
@@ -24,9 +26,10 @@ namespace QuestMods
 
         public override void OnInitializeMelon()
         {
-            LoggerInstance.Msg("=== QuestMods 1.9.6: experimental Quest Mods wheel ===");
+            LoggerInstance.Msg("=== QuestMods 1.10.0: experimental Quest Mods wheel ===");
             PatchInitializers();
             GrabbyHands.Install(HarmonyInstance);
+            SuperSpeed.Install();
             PatchGetter(typeof(QuickAccessMenuAction), "IsDev", typeof(MenuDevPatch));
             PatchGetter(typeof(UserRoles), nameof(UserRoles.IsDeveloper), typeof(UserRolesPatch));
             PatchGetter(typeof(QuickAccessMenuAction), "IsIgnored", typeof(IgnoredPatch));
@@ -38,6 +41,7 @@ namespace QuestMods
             try { TabletProbe.Initialize(); DevWheelBridge.Initialize(); }
             catch (Exception ex) { LoggerInstance.Warning("Tablet probe setup failed: " + ex); }
             LoggerInstance.Warning("Debug movement is not automatically enabled. Experimental IsIgnored overrides remain enabled.");
+            LoggerInstance.Msg("Super Speed defaults OFF and only writes the local '" + SuperSpeed.StatName + "' stat while ON (5x). Bubble colours are display only.");
         }
 
         private void PatchInitializers()
@@ -111,6 +115,8 @@ namespace QuestMods
         {
             DebugStateMonitor.SceneLoaded();
             GrabbyHands.SceneLoaded();
+            SuperSpeed.SceneLoaded();
+            BubbleTint.SceneLoaded();
             LoggerInstance.Msg($"Scene loaded: '{sceneName}' ({buildIndex}). {Counts()}");
             try { TabletProbe.SceneLoaded(buildIndex, sceneName); DevWheelBridge.SceneLoaded(); }
             catch (Exception ex) { LoggerInstance.Warning("Tablet probe scene event: " + ex.Message); }
@@ -118,7 +124,7 @@ namespace QuestMods
 
         public override void OnUpdate()
         {
-            try { TabletProbe.Tick(); DevWheelBridge.Tick(); DebugStateMonitor.Tick(); GrabbyHands.Tick(); }
+            try { TabletProbe.Tick(); DevWheelBridge.Tick(); DebugStateMonitor.Tick(); GrabbyHands.Tick(); SuperSpeed.Tick(); BubbleTint.Tick(); }
             catch (Exception ex) { LoggerInstance.Warning("Tablet probe tick: " + ex.Message); }
             if (reports >= 12 || DateTime.UtcNow < nextReport) return;
             reports++;
@@ -639,23 +645,12 @@ namespace QuestMods
                     {
                         // Use a native nesting action as the selectable wheel item;
                         // intercept its concrete spawn for our clone only.
-                        grabby = CloneNest(source, instantiate, spawnedProperty);
-                        // Validity is derived from the native Fly action. If the
-                        // native spawn hook is bypassed, this safe fallback can
-                        // expose Fly, but never the duplicated developer pages.
-                        object sourceArray = nestedProperty.GetValue(source);
-                        Type nativeArrayType = sourceArray.GetType();
-                        ConstructorInfo itemCtor = nativeArrayType.GetConstructor(new[] { typeof(long) }) ?? nativeArrayType.GetConstructor(new[] { typeof(int) });
-                        if (itemCtor == null) throw new Exception("No action-array constructor for Grabby Hands.");
-                        object fallbackChildren = itemCtor.Invoke(new[] { Convert.ChangeType(1, itemCtor.GetParameters()[0].ParameterType) });
-                        PropertyInfo item = nativeArrayType.GetProperties(Instance).FirstOrDefault(p => p.Name == "Item" && p.GetIndexParameters().Length == 1 && p.GetSetMethod(true) != null);
-                        if (item == null) throw new Exception("No action-array setter for Grabby Hands.");
-                        item.SetValue(fallbackChildren, debugAction, new[] { Convert.ChangeType(0, item.GetIndexParameters()[0].ParameterType) });
-                        nestedProperty.SetValue(grabby, fallbackChildren);
-                        nameProperty.SetValue(grabby, "Grabby Hands: OFF");
+                        grabby = CreateToggleClone(source, instantiate, spawnedProperty, nestedProperty,
+                                                   debugAction, nameProperty, "Grabby Hands: OFF");
                         GrabbyHands.Register(grabby);
                         made.Add(grabby);
-                        pages.Insert(debugAction != null ? 1 : 0, grabby);
+                        pages.Add(grabby);
+                        BubbleTint.Register(grabby, "Grabby Hands: ON / OFF", 0.15f, 0.90f, 0.25f);
                     }
                     catch (Exception ex)
                     {
@@ -664,10 +659,33 @@ namespace QuestMods
                         MelonLogger.Warning("[GrabbyHands] Could not create wheel toggle: " + ex);
                     }
                 }
+                if (SuperSpeed.Available && debugAction != null)
+                {
+                    // Sits directly beside Grabby Hands as a second direct toggle.
+                    object speed = null;
+                    try
+                    {
+                        speed = CreateToggleClone(source, instantiate, spawnedProperty, nestedProperty,
+                                                  debugAction, nameProperty, "Super Speed: OFF");
+                        SuperSpeed.Register(speed);
+                        made.Add(speed);
+                        pages.Add(speed);
+                        BubbleTint.Register(speed, "Super Speed: ON / OFF", 0.20f, 0.45f, 1.00f);
+                    }
+                    catch (Exception ex)
+                    {
+                        SuperSpeed.Unregister(speed);
+                        if (speed != null) DestroyClone(speed);
+                        MelonLogger.Warning("[SuperSpeed] Could not create wheel toggle: " + ex);
+                    }
+                }
+                if (debugAction != null)
+                    BubbleTint.Register(debugAction, "Fly (Debug Movement)", 0.95f, 0.15f, 0.15f);
                 if (pages.Count == 0) throw new Exception("No mod actions are available; cannot create empty Quest Mods menu.");
                 object root = CloneNest(source, instantiate, spawnedProperty);
                 made.Add(root);
                 nameProperty.SetValue(root, "Quest Mods");
+                BubbleTint.RegisterRoot(root);
 
                 Type arrayType = devArray.GetType();
                 ConstructorInfo ctor = arrayType.GetConstructor(new[] { typeof(long) }) ?? arrayType.GetConstructor(new[] { typeof(int) });
@@ -706,7 +724,14 @@ namespace QuestMods
             }
             catch (Exception ex)
             {
-                foreach (object obj in made) { GrabbyHands.Unregister(obj); DestroyClone(obj); }
+                foreach (object obj in made)
+                {
+                    GrabbyHands.Unregister(obj);
+                    SuperSpeed.Unregister(obj);
+                    BubbleTint.Unregister(obj);
+                    DestroyClone(obj);
+                }
+                BubbleTint.ClearRoots();
                 if (DateTime.UtcNow >= nextFailureLog)
                 {
                     nextFailureLog = DateTime.UtcNow.AddSeconds(15);
@@ -801,6 +826,37 @@ namespace QuestMods
             catch
             {
                 if (action != null && safeToDestroy) DestroyClone(action);
+                throw;
+            }
+        }
+
+        // A direct toggle is a native nesting action clone that never opens a
+        // submenu: the shared spawn hook suppresses exactly these clones. If the
+        // hook is ever bypassed, the single native Fly child is a harmless page.
+        private static object CreateToggleClone(object source, MethodInfo instantiate, PropertyInfo spawnedProperty,
+                                                PropertyInfo nestedProperty, object fallbackChild,
+                                                PropertyInfo nameProperty, string initialLabel)
+        {
+            object clone = null;
+            try
+            {
+                clone = CloneNest(source, instantiate, spawnedProperty);
+                object sourceArray = nestedProperty.GetValue(source);
+                if (sourceArray == null) throw new Exception("Source nesting action has no nestedActions.");
+                Type nativeArrayType = sourceArray.GetType();
+                ConstructorInfo itemCtor = nativeArrayType.GetConstructor(new[] { typeof(long) }) ?? nativeArrayType.GetConstructor(new[] { typeof(int) });
+                if (itemCtor == null) throw new Exception("No action-array constructor for " + initialLabel + ".");
+                object fallbackChildren = itemCtor.Invoke(new[] { Convert.ChangeType(1, itemCtor.GetParameters()[0].ParameterType) });
+                PropertyInfo item = nativeArrayType.GetProperties(Instance).FirstOrDefault(p => p.Name == "Item" && p.GetIndexParameters().Length == 1 && p.GetSetMethod(true) != null);
+                if (item == null) throw new Exception("No action-array setter for " + initialLabel + ".");
+                item.SetValue(fallbackChildren, fallbackChild, new[] { Convert.ChangeType(0, item.GetIndexParameters()[0].ParameterType) });
+                nestedProperty.SetValue(clone, fallbackChildren);
+                nameProperty.SetValue(clone, initialLabel);
+                return clone;
+            }
+            catch
+            {
+                if (clone != null) DestroyClone(clone);
                 throw;
             }
         }
@@ -968,6 +1024,750 @@ namespace QuestMods
         }
     }
 
+    // One shared prefix body for the single native SpawnNestedBubbles hook.
+    // Each direct toggle claims only its own clone; every other nesting page
+    // (including the Quest Mods root and the game's developer pages) is untouched.
+    internal static class WheelToggleRouter
+    {
+        public static bool BeforeSpawn(object __instance)
+        {
+            if (__instance == null) return true;
+            try { if (!GrabbyHands.BeforeWheelRun(__instance)) return false; }
+            catch { /* never block the game's own menus on our failure */ }
+            try { if (!SuperSpeed.BeforeWheelRun(__instance)) return false; }
+            catch { }
+            return true;
+        }
+    }
+
+    // "Super Speed" direct wheel toggle (5x local movement).
+    // Behaviour mirrors the game's own ToggleLocalSpeedMenuAction: read the local
+    // PlayerCharacter, resolve its Health.StatManager, look up the "speed" stat
+    // with GetStat("speed", out Stat), then flip Stat.Base between the normal
+    // value (1) and a boosted value (here 5 instead of 2). Everything is done
+    // through runtime reflection, so no new compile-time game reference is
+    // needed. Default OFF; the state is not persisted and is not re-applied on
+    // scene load.
+    internal static class SuperSpeed
+    {
+        public const string StatName = "speed";
+        private const float NormalSpeed = 1f;
+        private const float BoostedSpeed = 5f;
+        private const string LabelPrefix = "Super Speed: ";
+        private const BindingFlags I = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+        private const BindingFlags S = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+
+        private static readonly List<object> actions = new List<object>();
+        private static readonly HashSet<int> ids = new HashSet<int>();
+        private static bool enabled, fallbackDetected;
+        private static int pending, applyLogs;
+        private static DateTime nextFallbackCheck;
+        private static Type playerCharacterType, controllerType, playerType;
+        private static PropertyInfo controllerCurrent, playerCurrent;
+        private static bool typesResolved;
+
+        public static bool Available => GrabbyHands.Available;
+        public static bool Enabled => enabled;
+
+        public static void Install()
+        {
+            // Startup stays passive: like Grabby Hands nothing is hooked until
+            // the player controller and the wheel exist in-game.
+            MelonLogger.Msg("[SuperSpeed] Passive at startup. Toggle is added next to Grabby Hands; default OFF, 5x when ON.");
+        }
+
+        public static void Register(object action)
+        {
+            try
+            {
+                int id = Id(action);
+                ids.Add(id);
+                actions.Add(action);
+                UpdateLabels();
+                MelonLogger.Msg("[SuperSpeed] Added wheel toggle id=" + id + " (default OFF).");
+            }
+            catch (Exception ex) { MelonLogger.Warning("[SuperSpeed] Could not register toggle: " + Detail(ex)); }
+        }
+
+        public static void Unregister(object action)
+        {
+            try { if (action != null) { ids.Remove(Id(action)); actions.Remove(action); } } catch { }
+        }
+
+        public static void SceneLoaded()
+        {
+            Interlocked.Exchange(ref pending, 0);
+            // A new scene creates a new local character whose stat starts at the
+            // game's normal value. Do not write to objects from the old scene.
+            if (enabled) MelonLogger.Msg("[SuperSpeed] Turned OFF on scene load; the new character starts at normal speed.");
+            enabled = false;
+            fallbackDetected = false;
+            applyLogs = 0;
+            UpdateLabels();
+            actions.Clear();
+            // IDs are kept: clones that are still alive must keep being ignored
+            // by the native submenu spawn.
+        }
+
+        public static bool BeforeWheelRun(object __instance)
+        {
+            bool ours = false;
+            try
+            {
+                if (__instance == null || !ids.Contains(Id(__instance))) return true;
+                string name = Read(__instance, "DisplayName") as string;
+                if (name == null || !name.StartsWith(LabelPrefix, StringComparison.Ordinal)) return true;
+                ours = true;
+                Interlocked.Increment(ref pending);
+                MelonLogger.Msg("[SuperSpeed] Toggle requested.");
+            }
+            catch (Exception ex) { MelonLogger.Warning("[SuperSpeed] Wheel request failed: " + Detail(ex)); }
+            return !ours;
+        }
+
+        public static void Tick()
+        {
+            int requests = Interlocked.Exchange(ref pending, 0);
+            CheckFallback();
+            if (requests <= 0 || fallbackDetected) return;
+            // Applied on the update loop, never inside the wheel callback.
+            for (int i = 0; i < requests && i < 10; i++)
+            {
+                bool desired = !enabled;
+                if (Apply(desired)) enabled = desired;
+                else MelonLogger.Warning("[SuperSpeed] Speed change was not applied; toggle state left unchanged.");
+            }
+            UpdateLabels();
+        }
+
+        private static void CheckFallback()
+        {
+            if (fallbackDetected || DateTime.UtcNow < nextFallbackCheck) return;
+            nextFallbackCheck = DateTime.UtcNow.AddMilliseconds(150);
+            foreach (object action in actions)
+            {
+                try
+                {
+                    object bubbles = Read(action, "spawnedBubbles");
+                    object count = Read(bubbles, "Count");
+                    if (count == null || Convert.ToInt32(count) <= 0) continue;
+                    fallbackDetected = true;
+                    enabled = false;
+                    MelonLogger.Warning("[SuperSpeed] Native spawn hook was bypassed: the Super Speed toggle is unavailable and no speed change was made.");
+                    UpdateLabels();
+                    break;
+                }
+                catch (Exception ex) { MelonLogger.Warning("[SuperSpeed] Fallback check failed: " + Detail(ex)); break; }
+            }
+        }
+
+        private static void UpdateLabels()
+        {
+            string label = fallbackDetected ? LabelPrefix + "UNAVAILABLE" : LabelPrefix + (enabled ? "ON (5x)" : "OFF");
+            PropertyInfo property = typeof(QuickAccessMenuAction).GetProperty("displayName", I);
+            foreach (object action in actions)
+            {
+                try { if (property?.GetSetMethod(true) != null) property.SetValue(action, label); }
+                catch (Exception ex) { MelonLogger.Warning("[SuperSpeed] Could not refresh label: " + Detail(ex)); }
+            }
+        }
+
+        private static bool Apply(bool boosted)
+        {
+            try
+            {
+                object character = FindPlayerCharacter();
+                if (character == null)
+                {
+                    MelonLogger.Warning("[SuperSpeed] Local player character is not available yet.");
+                    return false;
+                }
+                object statManager = FindStatManager(character);
+                if (statManager == null)
+                {
+                    MelonLogger.Warning("[SuperSpeed] Local character has no readable stat manager.");
+                    return false;
+                }
+                object stat = GetSpeedStat(statManager);
+                if (stat == null)
+                {
+                    MelonLogger.Warning("[SuperSpeed] The game did not expose a '" + StatName + "' stat.");
+                    return false;
+                }
+                float target = boosted ? BoostedSpeed : NormalSpeed;
+                float oldBase;
+                bool readable = TryGetFloat(stat, "Base", out oldBase);
+                if (!TrySetFloat(stat, "Base", target))
+                {
+                    MelonLogger.Warning("[SuperSpeed] '" + StatName + ".Base' is not writable through this build's proxy (" +
+                        stat.GetType().FullName + (stat.GetType().IsValueType ? ", value type" : "") + ").");
+                    return false;
+                }
+                // Confirm the write survived. A boxed struct copy would not.
+                float newBase = float.NaN;
+                object verify = GetSpeedStat(statManager);
+                if (verify != null) TryGetFloat(verify, "Base", out newBase);
+                bool confirmed = !float.IsNaN(newBase) && Math.Abs(newBase - target) < 0.01f;
+                if (!confirmed)
+                    MelonLogger.Warning("[SuperSpeed] The stat write could not be confirmed by a re-read; assuming the proxy wrote through.");
+                if (applyLogs++ < 20)
+                    MelonLogger.Msg("[SuperSpeed] " + (boosted ? "ON (5x)" : "OFF") + ": " + StatName + ".Base " +
+                        (readable ? oldBase.ToString("0.##") : "?") + " -> " + (float.IsNaN(newBase) ? "?" : newBase.ToString("0.##")) +
+                        "; stat=" + stat.GetType().FullName + ", manager=" + statManager.GetType().FullName + ".");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning("[SuperSpeed] Speed change failed: " + Detail(ex));
+                return false;
+            }
+        }
+
+        private static object FindPlayerCharacter()
+        {
+            ResolveTypes();
+            object current = null;
+            try { current = controllerCurrent?.GetValue(null); } catch { }
+            object character = AsCharacter(current);
+            if (character != null) return character;
+            // Some builds expose the character only through Player.Current.
+            object player = null;
+            try { player = playerCurrent?.GetValue(null); } catch { }
+            if (player != null)
+            {
+                foreach (string name in new[] { "PlayerCharacter", "playerCharacter", "Character", "character", "PlayerController", "Controller" })
+                {
+                    character = AsCharacter(SafeRead(player, name));
+                    if (character != null) return character;
+                }
+            }
+            return null;
+        }
+
+        private static object AsCharacter(object candidate)
+        {
+            if (candidate == null) return null;
+            if (playerCharacterType != null)
+            {
+                if (playerCharacterType.IsInstanceOfType(candidate)) return candidate;
+                object cast = QuestModsMenu.TryCast(candidate, playerCharacterType);
+                if (cast != null) return cast;
+            }
+            // Fallback: any proxy that actually exposes Health works with the
+            // reference member chain, even without the exact type.
+            return SafeRead(candidate, "Health") != null ? candidate : null;
+        }
+
+        private static object FindStatManager(object character)
+        {
+            object direct = SafeRead(character, "StatManager");
+            if (direct != null) return direct;
+            object health = SafeRead(character, "Health");
+            if (health == null) return null;
+            return SafeRead(health, "StatManager") ?? SafeRead(health, "Stats");
+        }
+
+        // Reference shape: StatManager.GetStat(string, out Stat) : bool.
+        // The one-argument overload and a readable Base are accepted as fallbacks.
+        private static object GetSpeedStat(object statManager)
+        {
+            try
+            {
+                Type type = statManager.GetType();
+                foreach (MethodInfo method in MethodsIncludingBases(type))
+                {
+                    if (method.Name != "GetStat" || method.IsStatic) continue;
+                    ParameterInfo[] parameters = method.GetParameters();
+                    if (parameters.Length != 2 || parameters[0].ParameterType != typeof(string) || !parameters[1].ParameterType.IsByRef) continue;
+                    object[] args = { StatName, null };
+                    object result = method.Invoke(statManager, args);
+                    if (result is bool found && !found) return null;
+                    if (args[1] != null) return args[1];
+                }
+                foreach (MethodInfo method in MethodsIncludingBases(type))
+                {
+                    if (method.Name != "GetStat" || method.IsStatic) continue;
+                    ParameterInfo[] parameters = method.GetParameters();
+                    if (parameters.Length != 1 || parameters[0].ParameterType != typeof(string)) continue;
+                    object stat = method.Invoke(statManager, new object[] { StatName });
+                    if (stat != null && HasMember(stat, "Base")) return stat;
+                }
+            }
+            catch (Exception ex) { MelonLogger.Warning("[SuperSpeed] Stat lookup failed: " + Detail(ex)); }
+            return null;
+        }
+
+        private static bool TryGetFloat(object target, string name, out float value)
+        {
+            value = 0f;
+            try
+            {
+                Type type = target.GetType();
+                PropertyInfo property = type.GetProperty(name, I);
+                if (property != null && property.GetGetMethod(true) != null && property.GetIndexParameters().Length == 0)
+                { value = Convert.ToSingle(property.GetValue(target)); return true; }
+                FieldInfo field = FindField(type, name);
+                if (field != null) { value = Convert.ToSingle(field.GetValue(target)); return true; }
+            }
+            catch { }
+            return false;
+        }
+
+        private static bool TrySetFloat(object target, string name, float value)
+        {
+            try
+            {
+                Type type = target.GetType();
+                PropertyInfo property = type.GetProperty(name, I);
+                if (property != null && property.GetSetMethod(true) != null && property.GetIndexParameters().Length == 0)
+                { property.SetValue(target, ChangeTo(value, property.PropertyType)); return true; }
+                FieldInfo field = FindField(type, name);
+                if (field != null) { field.SetValue(target, ChangeTo(value, field.FieldType)); return true; }
+                foreach (string setter in new[] { "SetBase", "set_Base" })
+                {
+                    foreach (MethodInfo method in MethodsIncludingBases(type))
+                    {
+                        if (method.Name != setter || method.IsStatic) continue;
+                        ParameterInfo[] parameters = method.GetParameters();
+                        if (parameters.Length != 1) continue;
+                        method.Invoke(target, new[] { ChangeTo(value, parameters[0].ParameterType) });
+                        return true;
+                    }
+                }
+            }
+            catch (Exception ex) { MelonLogger.Warning("[SuperSpeed] Could not write " + name + ": " + Detail(ex)); }
+            return false;
+        }
+
+        private static object ChangeTo(float value, Type type)
+        {
+            if (type == typeof(float) || type == typeof(double) || type == typeof(int) || type == typeof(long) || type == typeof(short))
+                return Convert.ChangeType(value, type);
+            return value;
+        }
+
+        private static void ResolveTypes()
+        {
+            if (typesResolved) return;
+            typesResolved = true;
+            try
+            {
+                controllerType = FindType("Il2Cpp.PlayerController") ?? FindTypeBySimpleName("PlayerController");
+                playerType = FindType("Il2Cpp.Player") ?? FindTypeBySimpleName("Player");
+                controllerCurrent = controllerType?.GetProperty("Current", S | BindingFlags.FlattenHierarchy);
+                playerCurrent = playerType?.GetProperty("Current", S | BindingFlags.FlattenHierarchy);
+                Type[] types;
+                Assembly assembly = typeof(QuickAccessMenuAction).Assembly;
+                try { types = assembly.GetTypes(); }
+                catch (ReflectionTypeLoadException ex) { types = ex.Types; }
+                foreach (Type type in types)
+                {
+                    if (type == null || type.Name != "PlayerCharacter") continue;
+                    if (controllerType != null && !controllerType.IsAssignableFrom(type)) continue;
+                    if (!HasMember(type, "Health")) continue;
+                    playerCharacterType = type;
+                    break;
+                }
+                MelonLogger.Msg("[SuperSpeed] Local character type=" + (playerCharacterType?.FullName ?? "unresolved") +
+                    ", controller type=" + (controllerType?.FullName ?? "unresolved") +
+                    ", Player.Current=" + (playerCurrent != null) + ".");
+            }
+            catch (Exception ex) { MelonLogger.Warning("[SuperSpeed] Type resolution failed: " + Detail(ex)); }
+        }
+
+        private static Type FindType(string fullName)
+        {
+            foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                try { Type type = assembly.GetType(fullName, false); if (type != null) return type; }
+                catch { }
+            }
+            return null;
+        }
+
+        private static Type FindTypeBySimpleName(string name)
+        {
+            try
+            {
+                Type[] types;
+                Assembly assembly = typeof(QuickAccessMenuAction).Assembly;
+                try { types = assembly.GetTypes(); }
+                catch (ReflectionTypeLoadException ex) { types = ex.Types; }
+                return types.FirstOrDefault(t => t != null && t.Name == name);
+            }
+            catch { return null; }
+        }
+
+        private static List<MethodInfo> MethodsIncludingBases(Type type)
+        {
+            var result = new List<MethodInfo>();
+            var seen = new HashSet<string>();
+            for (Type current = type; current != null && current != typeof(object); current = current.BaseType)
+            {
+                MethodInfo[] methods;
+                try { methods = current.GetMethods(I | BindingFlags.DeclaredOnly); }
+                catch { break; }
+                foreach (MethodInfo method in methods)
+                {
+                    string key = method.Name + "/" + method.GetParameters().Length;
+                    if (seen.Add(key)) result.Add(method);
+                }
+            }
+            return result;
+        }
+
+        private static bool HasMember(object target, string name) => target != null && HasMember(target.GetType(), name);
+
+        private static bool HasMember(Type type, string name)
+        {
+            try { return type.GetProperty(name, I) != null || FindField(type, name) != null; }
+            catch { return false; }
+        }
+
+        private static FieldInfo FindField(Type type, string name)
+        {
+            for (Type current = type; current != null; current = current.BaseType)
+            {
+                FieldInfo field = current.GetField(name, I | BindingFlags.DeclaredOnly);
+                if (field != null) return field;
+            }
+            return null;
+        }
+
+        private static object SafeRead(object obj, string name)
+        {
+            try { return Read(obj, name); } catch { return null; }
+        }
+
+        private static object Read(object obj, string name)
+        {
+            if (obj == null) return null;
+            Type type = obj.GetType();
+            PropertyInfo property = type.GetProperty(name, I);
+            if (property != null && property.GetGetMethod(true) != null && property.GetIndexParameters().Length == 0) return property.GetValue(obj);
+            return FindField(type, name)?.GetValue(obj);
+        }
+
+        private static int Id(object obj)
+        {
+            if (obj == null) throw new Exception("null Unity object");
+            MethodInfo method = obj.GetType().GetMethod("GetInstanceID", I, null, Type.EmptyTypes, null);
+            if (method == null) throw new Exception("GetInstanceID unavailable on " + obj.GetType().FullName);
+            return Convert.ToInt32(method.Invoke(obj, null));
+        }
+
+        private static string Detail(Exception ex)
+        {
+            if (ex is TargetInvocationException && ex.InnerException != null) ex = ex.InnerException;
+            return ex.GetType().Name + ": " + ex.Message;
+        }
+    }
+
+    // Colours the Quest Mods wheel bubbles per action, because the game picks a
+    // bubble material purely from the action's validity. The bubble's current
+    // shared material is duplicated once per action colour and the tinted copy is
+    // assigned to that bubble's renderer, so the game's active/inactive switch
+    // still works (the tint is re-applied for the new source material).
+    // This is display only and never changes menu behaviour.
+    internal static class BubbleTint
+    {
+        private const BindingFlags I = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+        private static readonly string[] ColorProperties = { "_Color", "_BaseColor", "_TintColor", "_Base_Color", "_MainColor" };
+        private static readonly Dictionary<int, float[]> colors = new Dictionary<int, float[]>();   // action id -> rgb
+        private static readonly Dictionary<int, string> labels = new Dictionary<int, string>();      // action id -> name for logs
+        private static readonly Dictionary<string, object> materials = new Dictionary<string, object>(); // "action:source" -> tinted material
+        private static readonly HashSet<int> tintedIds = new HashSet<int>();
+        private static readonly List<object> roots = new List<object>();
+        private static DateTime next;
+        private static int applyLogs, failureLogs;
+        private static MethodInfo instantiate;
+        private static MethodInfo setColor;
+        private static MethodInfo hasProperty;
+        private static Type colorType;
+        private static bool hooksResolved;
+
+        public static void Register(object action, string label, float r, float g, float b)
+        {
+            try
+            {
+                int id = InstanceId(action);
+                colors[id] = new[] { r, g, b };
+                labels[id] = label;
+                MelonLogger.Msg("[BubbleTint] Queued colour rgb(" + r + ", " + g + ", " + b + ") for '" + label + "' id=" + id + ".");
+            }
+            catch (Exception ex) { MelonLogger.Warning("[BubbleTint] Could not queue colour: " + Detail(ex)); }
+        }
+
+        public static void Unregister(object action)
+        {
+            try
+            {
+                if (action == null) return;
+                int id = InstanceId(action);
+                colors.Remove(id);
+                labels.Remove(id);
+            }
+            catch { }
+        }
+
+        public static void RegisterRoot(object root)
+        {
+            try
+            {
+                if (root == null) return;
+                int id = InstanceId(root);
+                for (int i = roots.Count - 1; i >= 0; i--)
+                {
+                    try { if (InstanceId(roots[i]) == id) roots.RemoveAt(i); } catch { roots.RemoveAt(i); }
+                }
+                roots.Add(root);
+            }
+            catch (Exception ex) { MelonLogger.Warning("[BubbleTint] Could not track Quest Mods page: " + Detail(ex)); }
+        }
+
+        public static void ClearRoots()
+        {
+            roots.Clear();
+        }
+
+        public static void SceneLoaded()
+        {
+            foreach (object material in materials.Values) DestroyMaterial(material);
+            materials.Clear();
+            tintedIds.Clear();
+            colors.Clear();
+            labels.Clear();
+            roots.Clear();
+            applyLogs = 0;
+            failureLogs = 0;
+            next = DateTime.MinValue;
+        }
+
+        // Bubbles are pooled and appear a moment after the page opens, so this
+        // small poll (only while our page owns bubbles) is safer than assuming
+        // the spawn is synchronous.
+        public static void Tick()
+        {
+            if (colors.Count == 0 || roots.Count == 0) return;
+            if (DateTime.UtcNow < next) return;
+            next = DateTime.UtcNow.AddMilliseconds(250);
+            foreach (object root in roots.ToArray())
+            {
+                if (root == null) continue;
+                List<object> bubbles;
+                try { bubbles = DevWheelBridge.ReadArray(Read(root, "spawnedBubbles")); }
+                catch { continue; }
+                foreach (object bubble in bubbles) Apply(bubble);
+            }
+        }
+
+        private static void Apply(object bubble)
+        {
+            if (bubble == null) return;
+            try
+            {
+                object content = Read(bubble, "content");
+                if (content == null) return;
+                int actionId = InstanceId(content);
+                float[] color;
+                if (!colors.TryGetValue(actionId, out color)) return;
+                object renderer = Read(bubble, "bubbleRenderer");
+                if (renderer == null)
+                {
+                    if (failureLogs++ < 6)
+                        MelonLogger.Warning("[BubbleTint] Bubble '" + (Read(bubble, "name") ?? "?") + "' has no readable bubbleRenderer; colour skipped.");
+                    return;
+                }
+                object shared = Read(renderer, "sharedMaterial") ?? Read(renderer, "SharedMaterial");
+                if (shared == null) return;
+                int sharedId = InstanceId(shared);
+                if (tintedIds.Contains(sharedId)) return; // already one of our tinted copies
+                string key = actionId + ":" + sharedId;
+                object tinted;
+                if (!materials.TryGetValue(key, out tinted) || tinted == null)
+                {
+                    tinted = CreateTintedMaterial(shared, color, actionId);
+                    if (tinted == null) return;
+                    materials[key] = tinted;
+                    tintedIds.Add(InstanceId(tinted));
+                }
+                Assign(renderer, tinted);
+            }
+            catch (Exception ex)
+            {
+                if (failureLogs++ < 6) MelonLogger.Warning("[BubbleTint] Could not colour a bubble: " + Detail(ex));
+            }
+        }
+
+        private static object CreateTintedMaterial(object source, float[] color, int actionId)
+        {
+            ResolveHooks(source);
+            if (instantiate == null) return null;
+            object copy = null;
+            try { copy = instantiate.Invoke(null, new[] { source }); }
+            catch (Exception ex)
+            {
+                if (failureLogs++ < 6) MelonLogger.Warning("[BubbleTint] Material copy failed: " + Detail(ex));
+                return null;
+            }
+            if (copy == null) return null;
+            if (InstanceId(copy) == InstanceId(source))
+            {
+                MelonLogger.Warning("[BubbleTint] Material copy was not a separate object; colours are skipped.");
+                return null;
+            }
+            object value = MakeColor(color);
+            if (value == null || setColor == null)
+            {
+                MelonLogger.Warning("[BubbleTint] No usable UnityEngine.Color/Material.SetColor; colours are skipped.");
+                return null;
+            }
+            var applied = new List<string>();
+            foreach (string property in ColorProperties)
+            {
+                bool exists;
+                try { exists = hasProperty == null || Convert.ToBoolean(hasProperty.Invoke(copy, new object[] { property })); }
+                catch { continue; }
+                if (!exists) continue;
+                try { setColor.Invoke(copy, new[] { (object)property, value }); applied.Add(property); }
+                catch (Exception ex) { if (failureLogs++ < 6) MelonLogger.Warning("[BubbleTint] SetColor " + property + " failed: " + Detail(ex)); }
+            }
+            if (applied.Count == 0)
+            {
+                string named = null;
+                labels.TryGetValue(actionId, out named);
+                if (failureLogs++ < 6)
+                    MelonLogger.Warning("[BubbleTint] Material '" + (Read(copy, "name") ?? "?") + "' (shader " +
+                        (Read(Read(copy, "shader"), "name") ?? "?") + ") has no known colour property; '" +
+                        (named ?? actionId.ToString()) + "' keeps its original colour.");
+                DestroyMaterial(copy);
+                return null;
+            }
+            string tintedName = null;
+            labels.TryGetValue(actionId, out tintedName);
+            if (applyLogs++ < 12)
+                MelonLogger.Msg("[BubbleTint] Tinted '" + (tintedName ?? actionId.ToString()) +
+                    "' via " + string.Join("/", applied.ToArray()) + ".");
+            return copy;
+        }
+
+        private static void ResolveHooks(object source)
+        {
+            if (hooksResolved) return;
+            hooksResolved = true;
+            try
+            {
+                Type unityObject = AppDomain.CurrentDomain.GetAssemblies()
+                    .Select(a => a.GetType("UnityEngine.Object", false)).FirstOrDefault(t => t != null);
+                if (unityObject != null)
+                {
+                    MethodInfo generic = unityObject.GetMethods(BindingFlags.Public | BindingFlags.Static)
+                        .FirstOrDefault(m => m.Name == "Instantiate" && m.IsGenericMethodDefinition &&
+                                             m.GetGenericArguments().Length == 1 && m.GetParameters().Length == 1 &&
+                                             m.GetParameters()[0].ParameterType.IsGenericParameter);
+                    // Only keep the closed generic; an unclosed definition cannot
+                    // be invoked.
+                    if (generic != null)
+                    {
+                        try { instantiate = generic.MakeGenericMethod(source.GetType()); }
+                        catch (Exception ex) { MelonLogger.Warning("[BubbleTint] Instantiate<" + source.GetType().Name + "> unavailable: " + Detail(ex)); }
+                    }
+                }
+                Type materialType = source.GetType();
+                setColor = materialType.GetMethods(I).FirstOrDefault(m =>
+                {
+                    ParameterInfo[] p = m.GetParameters();
+                    return m.Name == "SetColor" && !m.IsStatic && p.Length == 2 && p[0].ParameterType == typeof(string) && p[1].ParameterType.IsValueType;
+                });
+                hasProperty = materialType.GetMethods(I).FirstOrDefault(m =>
+                {
+                    ParameterInfo[] p = m.GetParameters();
+                    return m.Name == "HasProperty" && !m.IsStatic && m.ReturnType == typeof(bool) && p.Length == 1 && p[0].ParameterType == typeof(string);
+                });
+                colorType = setColor?.GetParameters()[1].ParameterType;
+                if (colorType == null)
+                    colorType = AppDomain.CurrentDomain.GetAssemblies()
+                        .Select(a => a.GetType("UnityEngine.Color", false)).FirstOrDefault(t => t != null);
+                MelonLogger.Msg("[BubbleTint] Material instantiate=" + (instantiate != null) + ", SetColor=" + (setColor != null) +
+                    ", HasProperty=" + (hasProperty != null) + ", Color type=" + (colorType?.FullName ?? "unresolved") + ".");
+            }
+            catch (Exception ex) { MelonLogger.Warning("[BubbleTint] Setup failed: " + Detail(ex)); }
+        }
+
+        private static object MakeColor(float[] color)
+        {
+            if (colorType == null) return null;
+            try { return Activator.CreateInstance(colorType, new object[] { color[0], color[1], color[2], 1f }); }
+            catch { }
+            try
+            {
+                object value = Activator.CreateInstance(colorType);
+                foreach (string channel in new[] { "r", "g", "b", "a" })
+                {
+                    FieldInfo field = colorType.GetField(channel, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    if (field == null || field.FieldType != typeof(float)) continue;
+                    field.SetValue(value, channel == "r" ? color[0] : channel == "g" ? color[1] : channel == "b" ? color[2] : 1f);
+                }
+                return value;
+            }
+            catch { return null; }
+        }
+
+        private static void Assign(object renderer, object material)
+        {
+            PropertyInfo property = renderer.GetType().GetProperty("sharedMaterial", I);
+            if (property?.GetSetMethod(true) != null && property.PropertyType.IsInstanceOfType(material))
+            { property.SetValue(renderer, material); return; }
+            MethodInfo setter = renderer.GetType().GetMethods(I).FirstOrDefault(m =>
+            {
+                ParameterInfo[] p = m.GetParameters();
+                return m.Name == "SetSharedMaterial" && !m.IsStatic && p.Length == 1 && p[0].ParameterType.IsInstanceOfType(material);
+            });
+            if (setter != null) { setter.Invoke(renderer, new[] { material }); return; }
+            throw new Exception("Renderer.sharedMaterial is not writable on " + renderer.GetType().FullName);
+        }
+
+        private static void DestroyMaterial(object material)
+        {
+            try
+            {
+                Type unityObject = AppDomain.CurrentDomain.GetAssemblies().Select(a => a.GetType("UnityEngine.Object", false)).FirstOrDefault(t => t != null);
+                MethodInfo destroy = unityObject?.GetMethod("Destroy", BindingFlags.Static | BindingFlags.Public, null, new[] { unityObject }, null);
+                destroy?.Invoke(null, new[] { material });
+            }
+            catch { }
+        }
+
+        // Local instance-id helper (the mod's other helper classes have their own).
+        private static int InstanceId(object obj)
+        {
+            if (obj == null) throw new Exception("null Unity object");
+            MethodInfo method = obj.GetType().GetMethod("GetInstanceID", I, null, Type.EmptyTypes, null);
+            if (method == null) throw new Exception("GetInstanceID unavailable on " + obj.GetType().FullName);
+            return Convert.ToInt32(method.Invoke(obj, null));
+        }
+
+        private static object Read(object obj, string name)
+        {
+            if (obj == null) return null;
+            Type type = obj.GetType();
+            PropertyInfo property = type.GetProperty(name, I);
+            if (property != null && property.GetGetMethod(true) != null && property.GetIndexParameters().Length == 0) return property.GetValue(obj);
+            for (Type current = type; current != null; current = current.BaseType)
+            {
+                FieldInfo field = current.GetField(name, I | BindingFlags.DeclaredOnly);
+                if (field != null) return field.GetValue(obj);
+            }
+            return null;
+        }
+
+        private static string Detail(Exception ex)
+        {
+            if (ex is TargetInvocationException && ex.InnerException != null) ex = ex.InnerException;
+            return ex.GetType().Name + ": " + ex.Message;
+        }
+    }
+
     // No custom board or Unity objects. The wheel item and the grab hook are
     // experimental; actual native call dispatch varies between Quest builds.
     internal static class GrabbyHands
@@ -1007,9 +1807,11 @@ namespace QuestMods
                 MethodInfo spawn = typeof(NestingMenuAction).GetMethods(I | BindingFlags.DeclaredOnly)
                     .FirstOrDefault(m => m.Name == "SpawnNestedBubbles" && m.GetParameters().Length == 3 && m.ReturnType == typeof(void) && !m.IsAbstract);
                 if (spawn == null) throw new Exception("NestingMenuAction.SpawnNestedBubbles not found");
-                grabHarmony.Patch(spawn, prefix: new HarmonyMethod(typeof(GrabbyHands).GetMethod(nameof(BeforeWheelRun), S)));
+                // One shared prefix routes every direct toggle (Grabby Hands and
+                // Super Speed) so both clones reuse this single verified hook.
+                grabHarmony.Patch(spawn, prefix: new HarmonyMethod(typeof(WheelToggleRouter).GetMethod(nameof(WheelToggleRouter.BeforeSpawn), S)));
                 ready = true;
-                MelonLogger.Msg("[GrabbyHands] Spawn hook registered in-game; native interception is not yet verified. Default OFF.");
+                MelonLogger.Msg("[GrabbyHands] Spawn hook registered in-game; native interception is not yet verified. Grabby Hands and Super Speed default OFF.");
             }
             catch (Exception ex) { MelonLogger.Warning("[GrabbyHands] Wheel hook unavailable; no toggle will be added: " + Detail(ex)); }
         }

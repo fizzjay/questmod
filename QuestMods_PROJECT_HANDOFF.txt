@@ -9,9 +9,26 @@ This is a handoff for a developer or future AI assistant working on this project
 
 CURRENT STATUS — READ THIS FIRST
 --------------------------------
-Latest source: Questmods_1.9.6.cs
-Latest version actually tested by the user: Questmods_1.9.5.cs
-Status of 1.9.6: produced and statically checked for balanced delimiters only. It has NOT been compiled by the assistant or tested on the Quest. Do not describe it as verified or working on all slots.
+Latest source: Class1.cs (QuestMods 1.10.0 in this repository)
+Latest version actually tested by the user: Questmods_1.9.5.cs for Grabby Hands behaviour; 1.10.0 is untested.
+Status of 1.10.0: produced and statically checked for balanced delimiters and parse errors only. It has NOT been compiled by the assistant or tested on the Quest. Do not describe it as verified. It keeps the 1.9.6 Grabby Hands logic unchanged.
+
+VERSION 1.10.0 — SUPER SPEED TOGGLE AND BUBBLE COLOURS
+-----------------------------------------------------
+The Quest Mods page now has three root bubbles, in this order: Fly (Debug Movement), Grabby Hands, Super Speed.
+
+Super Speed (new, default OFF, 5x):
+- Modelled on the game's own ToggleLocalSpeedMenuAction the user supplied: resolve the local PlayerCharacter, read Health.StatManager, call GetStat("speed", out Stat), then write Stat.Base. Normal is 1; this mod uses 5 instead of the game's 2.
+- Implemented as a second clone of the native nesting action exactly like Grabby Hands, so it uses the same already-exercised SpawnNestedBubbles prefix hook instead of a new native method. A new shared prefix body, WheelToggleRouter.BeforeSpawn, dispatches to GrabbyHands and SuperSpeed so only one native hook is installed.
+- WheelToggleRouter captures the request; SuperSpeed.Tick applies the stat write on the normal update loop, never inside the wheel callback. Login/scene load resets the toggle to OFF (the new character starts at normal speed); objects from the previous scene are never touched.
+- All stat access is runtime reflection (no new compile-time game reference). It logs the resolved character/stat manager types, the old and new Base value, and warns if the write cannot be confirmed by a re-read. If Stat turned out to be a value type on the Quest build, a write would not persist and that is logged rather than assumed to work.
+- Unverified on hardware: whether PlayerCharacter is resolvable from PlayerController.Current, whether GetStat exposes the out overload to reflection, and whether Stat.Base is writable through the IL2CPP proxy.
+
+Bubble colours (display only):
+- Fly = red, Grabby Hands = green, Super Speed = blue.
+- QuickAccessMenuBubble picks activeBubbleMaterial/inactiveBubbleMaterial from the action's validity, so assigning a colour to the shared asset would either be overwritten or tint every menu. Instead the bubble's current shared material is duplicated with Object.Instantiate once per action+source material, the tint is written through Material.SetColor on the first existing property among _Color, _BaseColor, _TintColor, _Base_Color, _MainColor, and the tinted copy is assigned to that bubble's renderer.
+- Bubbles are pooled and spawn slightly after the page opens, so BubbleTint polls the Quest Mods root's spawnedBubbles every 250 ms instead of assuming a synchronous spawn. Each tinted material is re-created when the game swaps the source material (validity change), and colours reset on scene load.
+- If the material has no known colour property, BubbleTint logs the material and shader name once and leaves the bubble at its original colour; behaviour is unaffected. No Harmony patches are added for this feature.
 
 The user reported that 1.9.5 worked on some slots, but not all. Its log confirms the fallback was invoked on some StockDock targets, but the observed line said Interacting=True and the original referenced pickup still had IsDocked=True. That line alone does NOT prove that pickup was undocked, that a particular item was grabbed, or that any change persisted server-side. The user's report of partial success is valid, but cannot be assigned to a particular logged line without additional evidence.
 
@@ -25,7 +42,7 @@ PROJECT GOAL AND USER REQUIREMENTS
 - The user reports having authorization from the game owner to mod the shut-down game.
 - The user's practical reason for Grabby Hands is to allow moderators to grab unwanted items in shop slots and other supported slots. The user wants it useful for all slots, not just shop-specific names. Do not claim universal support until verified.
 - Main radial wheel must retain the game's Dev Tools 1 and Dev Tools 2 entries.
-- A native nested radial wheel named "Quest Mods" contains the working Fly/debug-movement action and a DIRECT "Grabby Hands" ON/OFF toggle. Do not add duplicated Dev Tools pages inside Quest Mods. Do not turn Grabby Hands into another submenu.
+- A native nested radial wheel named "Quest Mods" contains the working Fly/debug-movement action, a DIRECT "Grabby Hands" ON/OFF toggle, and (1.10.0) a DIRECT "Super Speed" ON/OFF toggle (5x local speed) next to it. Do not add duplicated Dev Tools pages inside Quest Mods. Do not turn Grabby Hands or Super Speed into submenus.
 - Use "mod" rather than "cheat" in user-facing naming. Historical files and the current installed DLL may still be named Questcheats for continuity, but current source namespace/labels use QuestMods/Quest Mods.
 - Debug movement must be manual only: do not turn it on when joining a scene, and do not change normal movement speed except when the user activates the existing game action or the explicit mod toggle. Preserve the known-working native debug toggle.
 - The wheel/menu is client-side. Client-side developer flags or item changes do not grant server permissions or guarantee server-side persistence.
@@ -83,7 +100,8 @@ The namespace is QuestMods and the entry point is QuestMods.Mod : MelonMod. Most
    - DevWheelBridge waits until in-game, reflects over QuickAccessMenuController runtime objects, and targets owned controller extension clones, not prefab assets. It reads the normal and developer arrays, appends missing Dev Tools 1/2 to the root wheel, and prepares Quest Mods.
    - QuestModsMenu creates a native nested menu by cloning existing game action assets. It converts the local Player.Current proxy to Il2Cpp.Player when necessary using reflected interop TryCast/Cast; an IPlayer proxy cannot simply be passed to InitializeForPlayer.
    - The Fly/debug-movement child is cloned from the native ToggleDebugMovementMenuAction. It is initialized for the local player but not run or automatically enabled.
-   - Grabby Hands is presented as a direct toggle. It uses a cloned nesting action and a deferred Harmony prefix on SpawnNestedBubbles; it suppresses nested spawning only for the verified custom clone and queues a toggle request for the update loop. If the hook is bypassed, fallback detection can mark Grabby Hands unavailable rather than pretending the toggle worked.
+   - Grabby Hands and Super Speed are presented as direct toggles. Both use cloned nesting actions and the same deferred Harmony prefix on SpawnNestedBubbles (WheelToggleRouter.BeforeSpawn dispatches to each); it suppresses nested spawning only for the verified custom clones and queues a toggle request for the update loop. If the hook is bypassed, fallback detection marks that toggle unavailable rather than pretending it worked.
+   - BubbleTint only recolours the three Quest Mods bubbles (Fly red, Grabby Hands green, Super Speed blue) by duplicating the bubble's current shared material per action. It adds no Harmony patches and cannot change menu behaviour.
    - Two local wheel controllers and their actual Controller/Interactor IDs are registered. The mod uses exact identity and IsLocal checks rather than object-name or transform-distance guesses.
 
 3. Debug movement and diagnostics
