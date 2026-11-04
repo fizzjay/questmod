@@ -9,9 +9,34 @@ This is a handoff for a developer or future AI assistant working on this project
 
 CURRENT STATUS — READ THIS FIRST
 --------------------------------
-Latest source: Class1.cs (QuestMods 1.10.0 in this repository)
-Latest version actually tested by the user: Questmods_1.9.5.cs for Grabby Hands behaviour; 1.10.0 is untested.
-Status of 1.10.0: produced and statically checked for balanced delimiters and parse errors only. It has NOT been compiled by the assistant or tested on the Quest. Do not describe it as verified. It keeps the 1.9.6 Grabby Hands logic unchanged.
+Latest source: Class1.cs (QuestMods 1.10.1 in this repository)
+Latest version actually tested by the user: QuestMods 1.10.0 ran on the Quest (log supplied). Grabby Hands partially worked, Super Speed did not change speed, bubble colours appeared but washed out/pastel.
+Status of 1.10.1: produced and statically checked for balanced delimiters and parse errors only. It has NOT been compiled by the assistant and has NOT been run on the Quest.
+
+WHAT THE 1.10.0 LOG SHOWED (facts, from the user's log)
+-------------------------------------------------------
+- The Quest Mods page was built with 3 actions and all three bubbles were tinted ("Tinted ... via _Color", shader reported nothing else), so the tint path executes.
+- Super Speed reached the update loop and resolved a stat manager but reported "Local character type=unresolved" and "The game did not expose a 'speed' stat", so the reference member chain (PlayerCharacter.Health.StatManager.GetStat("speed", out Stat)) did not match on that build. The old code only tried one manager, one member path and one GetStat shape, and only logged the failing sentence.
+- Grabby Hands logged real successes (a dock was grabbed, "confirmation returned; Interacting=True held=Smelter Gem") and then refused many other slots: "no overlap or count unavailable: 0", "slot belongs to another player or ownership is unknown", "slot has no readable docked pickup", "multiple distinct slots overlap; no guess".
+
+1.10.1 CHANGES
+--------------
+Super Speed:
+- Every plausible manager is now tried: character.StatManager, character.Stats, Health.StatManager/Stats/statManager, and the same under Player.Character/PlayerController.
+- For each manager the lookup tries GetStat(string, out Stat) (including a boxed default for byref value types), GetStat(string), a string indexer, and finally a scan of any stat collection (dictionary/list of stat objects) matched by key or name.
+- Character resolution no longer requires PlayerController assignability; it accepts the best PlayerCharacter match, falls back to Player.Current members, then to a live PlayerCharacter/Health component whose transform root matches the local controller.
+- New second route when no stat is found: the local SmoothLocomotion object (reached exactly how DebugStateMonitor reaches it) is scanned for a speed Stat proxy or float members whose name contains "speed"; originals are recorded once, scaled x5 while ON (re-applied every 500 ms in case the game recomputes them) and restored on OFF.
+- On any failure the mod logs a one-time, bounded "Diagnostics (one-time, read-only)" dump: the resolved character/health/manager/locomotion proxy types, their stat/health/speed/character members, any stat-collection entries by name, and matching type names. Ask for those [SuperSpeed] lines if speed still does not work.
+
+Grabby Hands (coverage):
+- Exact-reach overlap now falls back to the same capsule widened to x1.8 and x3 when nothing is hit, and the game's saturated ten-collider buffer still uses the uncapped query.
+- Several overlapping slots now resolve to the nearest slot (or nearest docked pickup) instead of refusing.
+- The strict guards that silently skipped slots (active flag, HasDockedPickup, QuantityStored, pickup.IsDocked, dock identity, IsOwnedByPlayer) no longer block the attempt: they are logged and the native confirmation/forwarding is invoked, so the game and server still make the final decision. Only non-slot overlaps, a cast failure or a missing native method stop it.
+- Loose pickups that are not docked are still left to the normal native grab.
+
+Bubble colours:
+- Tint colours are now vivid (pure red / green / blue) and multiplied by a 2.2 gain before being written, so they clamp to a saturated channel instead of reading as pastel.
+- Emission is set when the shader has _EmissionColor, with the _EMISSION keyword enabled, and the shader name is logged with each successful tint.
 
 VERSION 1.10.0 — SUPER SPEED TOGGLE AND BUBBLE COLOURS
 -----------------------------------------------------
@@ -46,7 +71,7 @@ PROJECT GOAL AND USER REQUIREMENTS
 - Use "mod" rather than "cheat" in user-facing naming. Historical files and the current installed DLL may still be named Questcheats for continuity, but current source namespace/labels use QuestMods/Quest Mods.
 - Debug movement must be manual only: do not turn it on when joining a scene, and do not change normal movement speed except when the user activates the existing game action or the explicit mod toggle. Preserve the known-working native debug toggle.
 - The wheel/menu is client-side. Client-side developer flags or item changes do not grant server permissions or guarantee server-side persistence.
-- Grabby Hands defaults OFF and turns OFF on scene load. Restrict operations to the verified local interactor and intended target; do not indiscriminately undock overlap lists or modify other players' interactions/owned slots.
+- Grabby Hands defaults OFF and turns OFF on scene load. Local-hand identity is still verified exactly, but as of 1.10.1 (user request: "it should be all") the fallback no longer silently skips slots for ownership/quantity/docked-state reasons: it attempts the nearest slot and lets the game's own confirmation, forwarding and the server decide. It still never undocks a whole overlap list and never targets a remote/network interaction.
 - Continue to provide COMPLETE updated source rather than partial snippets. Preserve the working wheel when iterating on Grabby Hands.
 - The user has limited time. Integrate useful diagnostics in the existing mod and avoid requiring unnecessary decompilation or a separate mod. Ask for focused logs when needed.
 - The user cannot currently supply their complete Quest project/reference DLLs. In particular, do not introduce a compile-time reference to Il2CppInterop.Runtime.dll as a new requirement if avoidable. Runtime reflection is used extensively for this reason.
