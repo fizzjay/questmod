@@ -2340,10 +2340,9 @@ namespace QuestMods
         private static readonly HashSet<int> localControllerIds = new HashSet<int>();
         private static readonly HashSet<int> localInteractorIds = new HashSet<int>();
         private static readonly List<Type> pickupTypes = new List<Type>();
-        private static int ownershipLogs, pickupLogs;
-        [ThreadStatic] private static bool insideUndock;
+        private static int ownershipLogs;
         private static bool ready, enabled, grabScanDone, wheelHookAttempted;
-        private static int grabHooks, holdHooks, seen, undockAttempts, pending, earlyLogs, startLogs, holdLogs;
+        private static int grabHooks, holdHooks, pending, startLogs, holdLogs;
         [ThreadStatic] private static bool insideFallback;
         private static global::HarmonyLib.Harmony grabHarmony;
         public static bool Available => ready;
@@ -2464,8 +2463,8 @@ namespace QuestMods
         {
             Interlocked.Exchange(ref pending, 0);
             if (enabled) MelonLogger.Msg("[GrabbyHands] Turned OFF on scene load.");
-            enabled = false; seen = 0; undockAttempts = 0; fallbackDetected = false;
-            ownershipLogs = 0; pickupLogs = 0; earlyLogs = 0; startLogs = 0; holdLogs = 0;
+            enabled = false; fallbackDetected = false;
+            ownershipLogs = 0; startLogs = 0; holdLogs = 0;
             UpdateLabels();
             actions.Clear();
             localHandTransforms.Clear();
@@ -2540,13 +2539,6 @@ namespace QuestMods
         {
             int requests = Interlocked.Exchange(ref pending, 0);
             CheckFallback();
-            if (enabled && locomotionFallbackActive && DateTime.UtcNow >= nextLocomotionReapply)
-            {
-                // Locomotion speed floats can be recomputed by the game every
-                // frame, so re-apply the recorded multiplier while it is ON.
-                nextLocomotionReapply = DateTime.UtcNow.AddMilliseconds(500);
-                TryLocomotionSpeed(true);
-            }
             if (requests <= 0 || fallbackDetected) return;
             for (int i = 0; i < requests && i < 10; i++)
             {
@@ -2558,7 +2550,7 @@ namespace QuestMods
                     break;
                 }
                 enabled = !enabled;
-                if (enabled) { earlyLogs = 0; startLogs = 0; holdLogs = 0; ownershipLogs = 0; pickupLogs = 0; seen = 0; }
+                if (enabled) { startLogs = 0; holdLogs = 0; ownershipLogs = 0; }
                 MelonLogger.Msg("[GrabbyHands] " + (enabled ? "ON" : "OFF") + ".");
             }
             UpdateLabels();
