@@ -9,9 +9,9 @@ This is a handoff for a developer or future AI assistant working on this project
 
 CURRENT STATUS — READ THIS FIRST
 --------------------------------
-Latest source: Class1.cs (QuestMods 1.11.0 in this repository)
-Latest version actually tested by the user: QuestMods 1.10.1 ran on the Quest (log supplied). Colours were confirmed good ("colors are nice"), the local PlayerCharacter resolved but Super Speed still changed no speed ("No readable stat manager on the local character."), and Grabby Hands could still not grab from back hands or pockets.
-Status of 1.11.0: produced and statically checked (tree-sitter parse, balanced braces, no unused private fields) only. It has NOT been compiled by the assistant and has NOT been run on the Quest.
+Latest source: Class1.cs (QuestMods 1.12.0 in this repository)
+Latest version actually tested by the user: QuestMods 1.11.0 ran on the Quest (log supplied). Colours were confirmed good ("colors are nice"), the local PlayerCharacter resolved but Super Speed still changed no speed ("No readable stat manager on the local character."), and Grabby Hands could still not grab from back hands or pockets.
+Status of 1.12.0: produced and statically checked (tree-sitter parse, balanced braces, no unused private fields) only. It has NOT been compiled by the assistant and has NOT been run on the Quest.
 
 WHAT THE 1.10.1 LOG SHOWED (facts, from the user's log)
 -------------------------------------------------------
@@ -21,6 +21,26 @@ WHAT THE 1.10.1 LOG SHOWED (facts, from the user's log)
 - Type names present in the assembly: IStatManager, Stat, PlayerStatManager, StatManager, StatManagerSaveData, StatManagerSaveData1, StatManagerSaveDataStat, PlayerCharacterTarget, PlayerCharacterCustomizationManager, PlayerCharacter.
 - Colours are approved: "Tinted ... via _Color/_EmissionColor (shader Township Tale/Cheap/SimpleStandard, gain x2.2)". Do not change the tint path.
 - Grabby Hands successes were forward reach only ("target=Dock ... held=Smelter Gem 2(Clone)", "target=StockDock ... held=Soft Fabric Large Roll(Clone)"). Failures were "expanded overlap x1.8/x3: 1-2 collider(s)" followed by "no interactable component in the overlap", and "overlap holds no slot-like interactable (Grab)": the back/hip slots are not inside the hand capsule at any radius, so widening the capsule could never reach them.
+
+WHAT THE 1.11.0 LOG SHOWED (facts, from the user's log)
+-------------------------------------------------------
+- Super Speed now works: "ON (5x): speed.Base -> 5 from live StatManager via Stats entry "speed"; stat=Il2CppAlta.StatSystem.Stat, manager=Il2CppAlta.StatSystem.StatManager." The route is the live StatManager list plus the "Stats" dictionary entry keyed "speed". No stat-manager member exists on the character.
+- That route logs every live StatManager (about 200 on that server) per toggle; 1.12.0 caps the line to 4 examples plus a count.
+- Grabby Hands now reaches the body slots: "target=Back Slot ... Interacting=True held=Bag(Clone)", "target=Pouch Slot Right", "target=Dock MR", "target=StockDock". The unmasked 2.5 m hand sweep is what finds them; the game's own capsule returns 0 colliders in a crowd.
+- Grab by Name was created and tinted but had no keyword: every press logged "No keyword set...", so the feature never ran a scan.
+- The old "Grabby Hands only reaches the forward capsule" failure is gone; the user's remaining complaint is "i still cant grab from other people".
+
+1.12.0 CHANGES
+--------------
+Grab by Name group (three wheel items, replacing the single bubble):
+- "Grab by Name" runs the grab with the stored keyword and amount.
+- "Type Keyword" spawns UnityEngine.TouchScreenKeyboard.Open via reflection (longest Open overload, enum/bool/string/int parameters filled by type), polls .status and .text on the mod update, saves the accepted text to UserData/questmods_grabname.txt and then grabs once. Done closes and commits; Canceled/LostFocus just closes. If TouchScreenKeyboard is missing it logs once and falls back to the file.
+- "Grab Amount" cycles 1 / 5 / 10 / 20 / 40 / 100 and stores the value in UserData/questmods_grabamount.txt.
+- Bubble colours: grab violet (0.85, 0.05, 1.00), type pink (1.00, 0.10, 0.75), amount teal (0.05, 0.90, 0.95).
+- The "no keyword file" message now appears once per scene instead of every five seconds.
+
+Grabby Hands:
+- The chosen slot's owner is reported ("owner=Type(value)") so a log from a crowd shows whether the target was another player's slot. Slots are still never pre-undocked and the game/server still decides.
 
 1.11.0 CHANGES
 --------------

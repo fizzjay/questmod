@@ -1,21 +1,17 @@
-﻿﻿// QuestMods 1.11.0 - existing Questmods mod with experimental developer wheel bridge.
-// Experimental native 3D nested wheel, not a tablet or rectangular panel.
+﻿// QuestMods 1.12.0 - mod wheel ("Quest Mods") for the Quest port of A Township Tale.
 // 1.10.0 added a "Super Speed" (5x local speed) toggle beside Grabby Hands and
 // per-action bubble colours (Fly red, Grabby Hands green, Super Speed blue).
-// 1.10.1 broadened every lookup: the speed stat is searched across all stat
-// managers/managers APIs, Grabby Hands attempts far more slots (expanded reach,
-// nearest-slot choice, no silent ownership skips) and bubble colours are
-// overdriven with emission so they read as vivid instead of pastel.
-// 1.11.0 fixes what the 1.10.1 log showed and adds a fourth bubble:
-//   - Super Speed resolves the stat manager through every owner it can find
-//     (character, controller, SmoothLocomotion.Character/character, live
-//     PlayerStatManager/StatManager) and accepts any GetStat-style API, falling
-//     back to scaling the locomotion speed fields when no manager exists.
-//   - Grabby Hands no longer depends on the hand capsule or on PickupDock: it
-//     also sweeps an unmasked sphere around the hand and accepts any slot-like
-//     object, so shop/storage/back and pocket slots are covered.
-//   - New "Grab by Name" bubble (violet): grabs every pickup whose name matches
-//     a keyword, ported from the PC mod's GrabByName.
+// 1.10.1 broadened every lookup. 1.11.0 fixed the speed stat route (it now
+// resolves live StatManager instances and writes Stat.Base), widened Grabby
+// Hands to any slot-like object, and added the "Grab by Name" bubble.
+// 1.12.0 turns the grab-by-name bubble into a three-item group:
+//   - "Grab by Name" grabs matching pickups (amount from its own wheel item),
+//   - "Type Keyword" spawns the platform keyboard (UnityEngine.TouchScreenKeyboard)
+//     so the keyword can be typed in headset, and saves it to UserData,
+//   - "Grab Amount" cycles 1 / 5 / 10 / 20 / 40 / 100 pickups per press.
+// Grabby Hands now also reports the owner of the slot it chose (for slots worn
+// by other players) and Super Speed no longer floods the log with every live
+// StatManager.
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -27,7 +23,7 @@ using Il2CppAlta.Api.DataTransferModels.Models.Shared;
 using Il2CppAlta.QuickAccessActions;
 using MelonLoader;
 
-[assembly: MelonInfo(typeof(QuestMods.Mod), "QuestMods", "1.11.0", "you")]
+[assembly: MelonInfo(typeof(QuestMods.Mod), "QuestMods", "1.12.0", "you")]
 [assembly: MelonGame(null, null)]
 
 namespace QuestMods
@@ -40,7 +36,7 @@ namespace QuestMods
 
         public override void OnInitializeMelon()
         {
-            LoggerInstance.Msg("=== QuestMods 1.11.0: experimental Quest Mods wheel ===");
+            LoggerInstance.Msg("=== QuestMods 1.12.0: experimental Quest Mods wheel ===");
             PatchInitializers();
             GrabbyHands.Install(HarmonyInstance);
             SuperSpeed.Install();
@@ -697,24 +693,17 @@ namespace QuestMods
                 }
                 if (GrabByName.Available && debugAction != null)
                 {
-                    // Fourth bubble: a one-shot action (no ON/OFF state) that
-                    // grabs every pickup whose name matches the keyword file.
-                    object grabName = null;
-                    try
-                    {
-                        grabName = CreateToggleClone(source, instantiate, spawnedProperty, nestedProperty,
-                                                     debugAction, nameProperty, "Grab by Name");
-                        GrabByName.Register(grabName);
-                        made.Add(grabName);
-                        pages.Add(grabName);
-                        BubbleTint.Register(grabName, "Grab by Name", 0.85f, 0.05f, 1.00f);
-                    }
-                    catch (Exception ex)
-                    {
-                        GrabByName.Unregister(grabName);
-                        if (grabName != null) DestroyClone(grabName);
-                        MelonLogger.Warning("[GrabByName] Could not create wheel action: " + ex);
-                    }
+                    // Grab group: one action that grabs, one that opens the
+                    // keyboard for the keyword, one that cycles the amount.
+                    CreateGrabItem(source, instantiate, spawnedProperty, nestedProperty, debugAction, nameProperty,
+                                   made, pages, GrabByName.KindRun, "Grab by Name", "Grab by Name (one shot)",
+                                   0.85f, 0.05f, 1.00f);
+                    CreateGrabItem(source, instantiate, spawnedProperty, nestedProperty, debugAction, nameProperty,
+                                   made, pages, GrabByName.KindType, "Type Keyword", "Type Keyword (keyboard)",
+                                   1.00f, 0.10f, 0.75f);
+                    CreateGrabItem(source, instantiate, spawnedProperty, nestedProperty, debugAction, nameProperty,
+                                   made, pages, GrabByName.KindAmount, "Grab Amount: 10", "Grab Amount",
+                                   0.05f, 0.90f, 0.95f);
                 }
                 if (debugAction != null)
                     BubbleTint.Register(debugAction, "Fly (Debug Movement)", 1.00f, 0.02f, 0.02f);
@@ -940,6 +929,32 @@ namespace QuestMods
                 }
             }
             return null;
+        }
+
+        // One "Grab by Name" wheel item: a clone of the native debug action that
+        // is routed to GrabByName by its own label and instance id.
+        private static object CreateGrabItem(object source, MethodInfo instantiate, PropertyInfo spawnedProperty,
+                                             PropertyInfo nestedProperty, object fallbackChild, PropertyInfo nameProperty,
+                                             List<object> made, List<object> pages, int kind, string label,
+                                             string tintLabel, float red, float green, float blue)
+        {
+            object action = null;
+            try
+            {
+                action = CreateToggleClone(source, instantiate, spawnedProperty, nestedProperty,
+                                           fallbackChild, nameProperty, label);
+                GrabByName.Register(action, kind);
+                made.Add(action);
+                pages.Add(action);
+                BubbleTint.Register(action, tintLabel, red, green, blue);
+            }
+            catch (Exception ex)
+            {
+                GrabByName.Unregister(action);
+                if (action != null) DestroyClone(action);
+                MelonLogger.Warning("[GrabByName] Could not create '" + label + "': " + ex);
+            }
+            return action;
         }
 
         private static void DestroyClone(object obj)
@@ -1525,7 +1540,7 @@ namespace QuestMods
                 ScanStatMembers(found, seen, owner.Value, owner.Key);
             }
             AddManagersByType(found, seen);
-            if (found.Count > 0) MelonLogger.Msg("[SuperSpeed] Stat manager candidate(s): " + DescribeManagers(found) + ".");
+            if (found.Count > 0) MelonLogger.Msg("[SuperSpeed] Stat manager candidate(s)=" + found.Count + "; first: " + DescribeManagers(found) + ".");
             return found;
         }
 
@@ -1646,12 +1661,15 @@ namespace QuestMods
         private static string DescribeManagers(List<KeyValuePair<string, object>> managers)
         {
             var parts = new List<string>();
+            int shown = 0;
             foreach (KeyValuePair<string, object> entry in managers)
             {
+                if (shown++ >= 4) break;
                 string type = "?";
                 try { type = entry.Value.GetType().Name; } catch { }
                 parts.Add(entry.Key + "=" + type);
             }
+            if (managers.Count > parts.Count) parts.Add("(+" + (managers.Count - parts.Count) + " more)");
             return string.Join(", ", parts.ToArray());
         }
 
@@ -2506,36 +2524,50 @@ namespace QuestMods
         }
     }
 
-    // "Grab by Name" wheel action, ported from the PC mod's GrabByName: read a
-    // keyword, find every pickup whose name contains it, and grab them through
-    // the local interactor. The keyword lives in
-    // <game>/UserData/questmods_grabname.txt so it can be set from a PC.
+    // "Grab by Name" wheel group, ported from the PC mod's GrabByName:
+    // a keyword, a grab amount, and the grab itself. Three wheel items share this
+    // class: "Grab by Name" runs it, "Type Keyword" opens the platform keyboard,
+    // "Grab Amount" cycles how many pickups one press may take.
     internal static class GrabByName
     {
         private const BindingFlags I = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
         private const BindingFlags S = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
-        private const string LabelPrefix = "Grab by Name";
-        private static readonly HashSet<int> ids = new HashSet<int>();
-        private static readonly List<object> held = new List<object>();
-        private static int pending, runLogs;
+        public const int KindRun = 0;
+        public const int KindType = 1;
+        public const int KindAmount = 2;
+        private const string RunLabel = "Grab by Name";
+        private const string TypeLabel = "Type Keyword";
+        private const string AmountLabel = "Grab Amount";
+        private static readonly int[] AmountSteps = { 1, 5, 10, 20, 40, 100 };
+
+        private static readonly Dictionary<int, int> kinds = new Dictionary<int, int>();
+        private static readonly List<object> actions = new List<object>();
+        private static int amount = 10;
+        private static int pendingKind = -1;
+        private static int missingFileLogged;
+        private static int keyboardLogs;
         private static string keyword = "";
         private static DateTime nextKeywordRead = DateTime.MinValue;
+        private static object keyboard;
+        private static bool keyboardOpen;
 
         public static bool Available => GrabbyHands.Available;
 
-        public static void Register(object action)
+        public static void Register(object action, int kind)
         {
             try
             {
                 int id = Id(action);
-                ids.Add(id);
-                Remember(action);
-                keyword = ReadKeyword() ?? keyword;
+                kinds[id] = kind;
+                if (!actions.Contains(action)) actions.Add(action);
+                string stored = ReadKeyword();
+                if (stored != null) keyword = stored;
+                amount = ReadAmount();
                 UpdateLabels();
-                MelonLogger.Msg("[GrabByName] Added wheel action id=" + id + ". Keyword file: " + (KeywordPath() ?? "unresolved") +
-                    " (keyword: '" + keyword + "').");
+                MelonLogger.Msg("[GrabByName] Added wheel item id=" + id + " (" + KindName(kind) + "); keyword '" +
+                    keyword + "', amount " + amount + ", file " + (KeywordPath() ?? "unresolved") + ".");
             }
-            catch (Exception ex) { MelonLogger.Warning("[GrabByName] Could not register action: " + Detail(ex)); }
+            catch (Exception ex) { MelonLogger.Warning("[GrabByName] Could not register item: " + Detail(ex)); }
         }
 
         public static void Unregister(object action)
@@ -2543,31 +2575,43 @@ namespace QuestMods
             try
             {
                 if (action == null) return;
-                ids.Remove(Id(action));
-                held.Remove(action);
+                kinds.Remove(Id(action));
+                actions.Remove(action);
             }
             catch { }
         }
 
         public static void SceneLoaded()
         {
-            Interlocked.Exchange(ref pending, 0);
-            runLogs = 0;
+            Interlocked.Exchange(ref pendingKind, -1);
+            missingFileLogged = 0;
+            keyboardLogs = 0;
             nextKeywordRead = DateTime.MinValue;
+            keyboard = null;
+            keyboardOpen = false;
             UpdateLabels();
         }
 
+        // Runs on the game's own wheel spawn; the actual work is queued so it
+        // happens on the normal update tick instead of inside a Harmony patch.
         public static bool BeforeWheelRun(object __instance)
         {
             bool ours = false;
             try
             {
-                if (__instance == null || !ids.Contains(Id(__instance))) return true;
+                if (__instance == null) return true;
+                int id;
+                try { id = Id(__instance); } catch { return true; }
+                int kind;
+                if (!kinds.TryGetValue(id, out kind)) return true;
                 string name = SafeRead(__instance, "DisplayName") as string;
-                if (name == null || !name.StartsWith(LabelPrefix, StringComparison.Ordinal)) return true;
+                if (name == null) return true;
+                if (!name.StartsWith(RunLabel, StringComparison.Ordinal) &&
+                    !name.StartsWith(TypeLabel, StringComparison.Ordinal) &&
+                    !name.StartsWith(AmountLabel, StringComparison.Ordinal)) return true;
                 ours = true;
-                Interlocked.Increment(ref pending);
-                MelonLogger.Msg("[GrabByName] Requested with keyword '" + keyword + "'.");
+                Interlocked.Exchange(ref pendingKind, kind);
+                MelonLogger.Msg("[GrabByName] " + KindName(kind) + " requested.");
             }
             catch (Exception ex) { MelonLogger.Warning("[GrabByName] Wheel request failed: " + Detail(ex)); }
             return !ours;
@@ -2575,39 +2619,145 @@ namespace QuestMods
 
         public static void Tick()
         {
-            int requests = Interlocked.Exchange(ref pending, 0);
-            if (DateTime.UtcNow >= nextKeywordRead)
+            if (keyboardOpen) { PollKeyboard(); return; }
+            int requested = Interlocked.Exchange(ref pendingKind, -1);
+            if (requested < 0) return;
+            if (requested == KindType) { OpenKeyboard(); return; }
+            if (requested == KindAmount) { CycleAmount(); return; }
+            string fresh = ReadKeyword();
+            if (fresh != null && fresh != keyword) { keyword = fresh; UpdateLabels(); }
+            if (string.IsNullOrEmpty(keyword))
             {
-                nextKeywordRead = DateTime.UtcNow.AddSeconds(5);
-                string fresh = ReadKeyword();
-                if (fresh != null && fresh != keyword) { keyword = fresh; UpdateLabels(); }
+                MelonLogger.Warning("[GrabByName] No keyword yet; opening the keyboard.");
+                OpenKeyboard();
+                return;
             }
-            for (int i = 0; i < requests && i < 4; i++)
-            {
-                string active = ReadKeyword();
-                if (active != null) keyword = active;
-                UpdateLabels();
-                if (string.IsNullOrEmpty(keyword))
-                {
-                    MelonLogger.Warning("[GrabByName] No keyword set. Put an item-name fragment in " +
-                        (KeywordPath() ?? "the keyword file") + " (one line, e.g. 'gem').");
-                    continue;
-                }
-                runLogs++;
-                try { GrabMatching(keyword); }
-                catch (Exception ex) { MelonLogger.Warning("[GrabByName] Grab failed: " + Detail(ex)); }
-            }
+            try { GrabMatching(keyword, amount); }
+            catch (Exception ex) { MelonLogger.Warning("[GrabByName] Grab failed: " + Detail(ex)); }
         }
 
-        private static void Remember(object action)
+        private static string KindName(int kind) =>
+            kind == KindType ? "Type Keyword" : kind == KindAmount ? "Grab Amount" : "Grab by Name";
+
+        private static void CycleAmount()
         {
-            if (action == null || held.Contains(action)) return;
-            held.Add(action);
+            int index = Array.IndexOf(AmountSteps, amount);
+            index = index < 0 ? 0 : (index + 1) % AmountSteps.Length;
+            amount = AmountSteps[index];
+            WriteAmount(amount);
+            UpdateLabels();
+            MelonLogger.Msg("[GrabByName] Grab amount is now " + amount + " pickup(s) per press.");
         }
 
-        // Ported algorithm: local interactor + every pickup whose name contains
-        // the keyword, grabbed through the interactor's own StartInteract.
-        private static void GrabMatching(string needle)
+        // ---- keyboard -------------------------------------------------------
+
+        private static void OpenKeyboard()
+        {
+            try
+            {
+                Type type = FindType("UnityEngine.TouchScreenKeyboard");
+                if (type == null)
+                {
+                    if (keyboardLogs++ < 2)
+                        MelonLogger.Warning("[GrabByName] TouchScreenKeyboard is not available; edit " +
+                            (KeywordPath() ?? "the keyword file") + " instead.");
+                    return;
+                }
+                MethodInfo open = type.GetMethods(S)
+                    .Where(m => m.Name == "Open" && m.ReturnType == type)
+                    .OrderByDescending(m => m.GetParameters().Length)
+                    .FirstOrDefault();
+                if (open == null)
+                {
+                    if (keyboardLogs++ < 2) MelonLogger.Warning("[GrabByName] TouchScreenKeyboard.Open was not found.");
+                    return;
+                }
+                keyboard = open.Invoke(null, KeyboardArgs(open));
+                keyboardOpen = keyboard != null;
+                if (!keyboardOpen)
+                {
+                    if (keyboardLogs++ < 2) MelonLogger.Warning("[GrabByName] The keyboard did not open; using the keyword file.");
+                    return;
+                }
+                MelonLogger.Msg("[GrabByName] Keyboard opened (current text '" + keyword + "'). Type, then press Done.");
+            }
+            catch (Exception ex)
+            {
+                keyboard = null;
+                keyboardOpen = false;
+                if (keyboardLogs++ < 3) MelonLogger.Warning("[GrabByName] Keyboard failed: " + Detail(ex));
+            }
+        }
+
+        private static object[] KeyboardArgs(MethodInfo open)
+        {
+            ParameterInfo[] p = open.GetParameters();
+            var args = new object[p.Length];
+            for (int i = 0; i < p.Length; i++)
+            {
+                Type t = p[i].ParameterType;
+                if (t == typeof(string)) args[i] = i == 0 ? keyword : "";
+                else if (t.IsEnum) args[i] = Enum.ToObject(t, 0);
+                else if (t == typeof(bool)) args[i] = false;
+                else if (t == typeof(int)) args[i] = 0;
+                else args[i] = t.IsValueType ? Activator.CreateInstance(t) : null;
+            }
+            return args;
+        }
+
+        private static void PollKeyboard()
+        {
+            try
+            {
+                if (keyboard == null) { keyboardOpen = false; return; }
+                string status = (SafeRead(keyboard, "status") ?? "Visible").ToString();
+                string text = SafeRead(keyboard, "text") as string;
+                if (status == "Visible")
+                {
+                    if (!string.IsNullOrEmpty(text) && text != keyword)
+                    {
+                        keyword = Clean(text);
+                        UpdateLabels();
+                    }
+                    return;
+                }
+                keyboardOpen = false;
+                keyboard = null;
+                if (status == "Done" && !string.IsNullOrEmpty(text))
+                {
+                    SetKeyword(text);
+                    MelonLogger.Msg("[GrabByName] Keyboard accepted '" + keyword + "'; grabbing up to " + amount + ".");
+                    GrabMatching(keyword, amount);
+                }
+                else MelonLogger.Msg("[GrabByName] Keyboard closed without a value (" + status + ").");
+            }
+            catch (Exception ex)
+            {
+                keyboardOpen = false;
+                keyboard = null;
+                MelonLogger.Warning("[GrabByName] Keyboard read failed: " + Detail(ex));
+            }
+        }
+
+        private static void SetKeyword(string text)
+        {
+            string clean = Clean(text);
+            if (clean.Length == 0) return;
+            keyword = clean;
+            WriteKeyword(clean);
+            UpdateLabels();
+        }
+
+        private static string Clean(string text)
+        {
+            if (text == null) return "";
+            string clean = text.Trim();
+            return clean.Length > 32 ? clean.Substring(0, 32) : clean;
+        }
+
+        // ---- grabbing -------------------------------------------------------
+
+        private static void GrabMatching(string needle, int limit)
         {
             List<object> interactors = GrabbyHands.LocalInteractorObjects();
             if (interactors.Count == 0)
@@ -2641,15 +2791,16 @@ namespace QuestMods
                     }
                 }
             }
-            MelonLogger.Msg("[GrabByName] Scanning " + candidates.Count + " pickup object(s) for '" + needle + "'.");
+            MelonLogger.Msg("[GrabByName] Scanning " + candidates.Count + " pickup object(s) for '" + needle +
+                "' (limit " + limit + ").");
             int matched = 0, grabbed = 0;
             foreach (object candidate in candidates)
             {
-                if (grabbed >= 20) break;
+                if (grabbed >= limit) break;
                 string name = SafeRead(candidate, "name") as string;
                 if (name == null || name.IndexOf(needle, StringComparison.OrdinalIgnoreCase) < 0) continue;
                 matched++;
-                if (grabbed < 20 && TryGrab(interactors, candidate, name)) grabbed++;
+                if (TryGrab(interactors, candidate, name)) grabbed++;
             }
             MelonLogger.Msg("[GrabByName] '" + needle + "': matched " + matched + ", grabbed " + grabbed + ".");
         }
@@ -2803,33 +2954,9 @@ namespace QuestMods
             return result;
         }
 
-        private static string ReadKeyword()
-        {
-            try
-            {
-                string path = KeywordPath();
-                if (path == null)
-                {
-                    if (runLogs == 0) MelonLogger.Msg("[GrabByName] Could not resolve the game folder for the keyword file.");
-                    return null;
-                }
-                if (!System.IO.File.Exists(path))
-                {
-                    if (runLogs == 0) MelonLogger.Msg("[GrabByName] No keyword file yet; create " + path + " containing one item-name fragment.");
-                    return null;
-                }
-                foreach (string raw in System.IO.File.ReadAllLines(path))
-                {
-                    string line = raw.Trim();
-                    if (line.Length == 0 || line.StartsWith("#")) continue;
-                    return line.Length > 48 ? line.Substring(0, 48) : line;
-                }
-            }
-            catch (Exception ex) { MelonLogger.Warning("[GrabByName] Could not read keyword file: " + Detail(ex)); }
-            return null;
-        }
+        // ---- storage --------------------------------------------------------
 
-        internal static string KeywordPath()
+        private static string DataFolder()
         {
             try
             {
@@ -2838,19 +2965,101 @@ namespace QuestMods
                 string mods = string.IsNullOrEmpty(location) ? null : System.IO.Path.GetDirectoryName(location);
                 string root = string.IsNullOrEmpty(mods) ? null : System.IO.Path.GetDirectoryName(mods);
                 if (string.IsNullOrEmpty(root)) return null;
-                return System.IO.Path.Combine(System.IO.Path.Combine(root, "UserData"), "questmods_grabname.txt");
+                return System.IO.Path.Combine(root, "UserData");
             }
             catch { return null; }
         }
 
+        internal static string KeywordPath()
+        {
+            string folder = DataFolder();
+            return folder == null ? null : System.IO.Path.Combine(folder, "questmods_grabname.txt");
+        }
+
+        private static string AmountPath()
+        {
+            string folder = DataFolder();
+            return folder == null ? null : System.IO.Path.Combine(folder, "questmods_grabamount.txt");
+        }
+
+        private static string ReadKeyword()
+        {
+            try
+            {
+                string path = KeywordPath();
+                if (path == null || !System.IO.File.Exists(path))
+                {
+                    if (missingFileLogged++ == 0)
+                        MelonLogger.Msg("[GrabByName] No keyword file yet (" + (path ?? "unresolved") +
+                            "); use the 'Type Keyword' wheel item or create it with one item-name fragment.");
+                    return null;
+                }
+                foreach (string raw in System.IO.File.ReadAllLines(path))
+                {
+                    string line = raw.Trim();
+                    if (line.Length == 0 || line.StartsWith("#")) continue;
+                    return line.Length > 32 ? line.Substring(0, 32) : line;
+                }
+            }
+            catch (Exception ex) { MelonLogger.Warning("[GrabByName] Could not read keyword file: " + Detail(ex)); }
+            return null;
+        }
+
+        private static void WriteKeyword(string value)
+        {
+            try
+            {
+                string path = KeywordPath();
+                if (path != null) System.IO.File.WriteAllText(path, value + Environment.NewLine);
+            }
+            catch (Exception ex) { MelonLogger.Warning("[GrabByName] Could not save keyword: " + Detail(ex)); }
+        }
+
+        private static int ReadAmount()
+        {
+            try
+            {
+                string path = AmountPath();
+                if (path == null || !System.IO.File.Exists(path)) return amount;
+                foreach (string raw in System.IO.File.ReadAllLines(path))
+                {
+                    int value;
+                    if (int.TryParse(raw.Trim(), out value) && value > 0)
+                        return value > 100 ? 100 : value;
+                }
+            }
+            catch { }
+            return amount;
+        }
+
+        private static void WriteAmount(int value)
+        {
+            try
+            {
+                string path = AmountPath();
+                if (path != null) System.IO.File.WriteAllText(path, value + Environment.NewLine);
+            }
+            catch { }
+        }
+
+        // ---- labels and helpers --------------------------------------------
+
         private static void UpdateLabels()
         {
-            string suffix = string.IsNullOrEmpty(keyword) ? " (set keyword file)" :
-                " '" + (keyword.Length > 16 ? keyword.Substring(0, 16) : keyword) + "'";
             PropertyInfo property = typeof(QuickAccessMenuAction).GetProperty("displayName", I);
-            foreach (object action in held)
+            foreach (object action in actions)
             {
-                try { if (property?.GetSetMethod(true) != null) property.SetValue(action, LabelPrefix + suffix); }
+                string label;
+                try
+                {
+                    int kind;
+                    if (!kinds.TryGetValue(Id(action), out kind)) continue;
+                    label = kind == KindType ? TypeLabel + ": " + (keyword.Length == 0 ? "(empty)" : keyword)
+                          : kind == KindAmount ? AmountLabel + ": " + amount
+                          : RunLabel + " x" + amount + " '" + keyword + "'";
+                }
+                catch { continue; }
+                try { if (property?.GetSetMethod(true) != null) property.SetValue(action, label); }
                 catch (Exception ex) { MelonLogger.Warning("[GrabByName] Could not refresh label: " + Detail(ex)); }
             }
         }
@@ -3324,9 +3533,12 @@ namespace QuestMods
                 object quantity = chosenDock == null ? null : SafeRead(chosenDock, "QuantityStored");
                 object dockedFlag = chosenDock == null ? null : SafeRead(chosenDock, "HasDockedPickup");
                 object activeFlag = SafeRead(SafeRead(chosenDock ?? target, "gameObject"), "activeInHierarchy");
+                object ownerInfo = SafeRead(chosenDock ?? target, "OwnerName") ?? SafeRead(chosenDock ?? target, "Owner") ??
+                                   SafeRead(chosenDock ?? target, "Player") ?? SafeRead(chosenDock ?? target, "IsOwnedByPlayer");
                 HoldLog("target=" + (SafeRead(chosenDock ?? target, "name") ?? "unknown") +
                     " active=" + (activeFlag ?? "?") + " docked=" + (dockedFlag ?? "?") +
                     " quantity=" + (quantity ?? "?") + " owned=" + (ownerFlag ?? "?") +
+                    " owner=" + DescribeValue(ownerInfo) +
                     "; requesting native confirmation (game and server decide)");
                 MethodInfo confirm = t.GetMethods(I).FirstOrDefault(m =>
                 {
@@ -3584,6 +3796,13 @@ namespace QuestMods
                 if (type != null) result.Add(type);
             }
             return result;
+        }
+
+        private static string DescribeValue(object value)
+        {
+            if (value == null) return "?";
+            try { return value.GetType().Name + "(" + (value.ToString() ?? "") + ")"; }
+            catch { return "unreadable"; }
         }
 
         private static void HoldLog(string message)
