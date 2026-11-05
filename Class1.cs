@@ -4,6 +4,9 @@
 // 1.10.1 broadened every lookup. 1.11.0 fixed the speed stat route (it now
 // resolves live StatManager instances and writes Stat.Base), widened Grabby
 // Hands to any slot-like object, and added the "Grab by Name" bubble.
+// 1.13.0 lets Grabby Hands reach into another player's worn backpack or pouch:
+// the slot is detected as foreign (not in the local hand's hierarchy) and the
+// pickup docked inside it is targeted instead of the slot itself.
 // 1.12.0 turns the grab-by-name bubble into a three-item group:
 //   - "Grab by Name" grabs matching pickups (amount from its own wheel item),
 //   - "Type Keyword" spawns the platform keyboard (UnityEngine.TouchScreenKeyboard)
@@ -23,7 +26,7 @@ using Il2CppAlta.Api.DataTransferModels.Models.Shared;
 using Il2CppAlta.QuickAccessActions;
 using MelonLoader;
 
-[assembly: MelonInfo(typeof(QuestMods.Mod), "QuestMods", "1.12.0", "you")]
+[assembly: MelonInfo(typeof(QuestMods.Mod), "QuestMods", "1.13.0", "you")]
 [assembly: MelonGame(null, null)]
 
 namespace QuestMods
@@ -36,7 +39,7 @@ namespace QuestMods
 
         public override void OnInitializeMelon()
         {
-            LoggerInstance.Msg("=== QuestMods 1.12.0: experimental Quest Mods wheel ===");
+            LoggerInstance.Msg("=== QuestMods 1.13.0: experimental Quest Mods wheel ===");
             PatchInitializers();
             GrabbyHands.Install(HarmonyInstance);
             SuperSpeed.Install();
@@ -3508,6 +3511,20 @@ namespace QuestMods
                     chosenDock = Nearest(__instance, slots);
                     target = chosenDock;
                     if (slots.Count > 1) HoldLog("multiple slots overlapped; chose the nearest of " + slots.Count);
+                    // A slot worn by somebody else is not in the local player's
+                    // hierarchy. Interacting with the slot itself is refused for
+                    // those, so aim at the pickup docked inside it instead.
+                    if (IsAnotherPlayersSlot(chosenDock, __instance))
+                    {
+                        object inner = SafeRead(chosenDock, "DockedPickup") ?? SafeRead(chosenDock, "DockedItem") ??
+                                       SafeRead(chosenDock, "Docked");
+                        if (inner != null)
+                        {
+                            target = inner;
+                            HoldLog("that slot belongs to another player; targeting the pickup inside it");
+                        }
+                        else HoldLog("that slot belongs to another player and holds no readable pickup");
+                    }
                 }
                 else if (dockedPickups.Count > 0)
                 {
@@ -3796,6 +3813,41 @@ namespace QuestMods
                 if (type != null) result.Add(type);
             }
             return result;
+        }
+
+        // True when the slot is not part of the local hand's hierarchy, i.e. it
+        // is worn by another player. Compared over a few ancestor levels so a
+        // shared scene root does not count as "same player".
+        private static bool IsAnotherPlayersSlot(object slot, object interactor)
+        {
+            try
+            {
+                object slotTransform = SafeRead(slot, "transform") ?? SafeRead(slot, "Transform");
+                object handTransform = SafeRead(interactor, "transform") ?? SafeRead(interactor, "triggerObjectTransform");
+                if (slotTransform == null || handTransform == null) return false;
+                HashSet<int> handChain = TransformChain(handTransform, 6);
+                foreach (int id in TransformChain(slotTransform, 6))
+                {
+                    if (handChain.Contains(id)) return false;
+                }
+                return true;
+            }
+            catch { return false; }
+        }
+
+        private static HashSet<int> TransformChain(object transform, int maxDepth)
+        {
+            var ids = new HashSet<int>();
+            object current = transform;
+            for (int depth = 0; depth < maxDepth && current != null; depth++)
+            {
+                try { ids.Add(Id(current)); } catch { }
+                object parent = null;
+                try { parent = SafeRead(current, "parent"); } catch { }
+                if (parent == null) break;
+                current = parent;
+            }
+            return ids;
         }
 
         private static string DescribeValue(object value)

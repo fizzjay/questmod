@@ -9,9 +9,9 @@ This is a handoff for a developer or future AI assistant working on this project
 
 CURRENT STATUS — READ THIS FIRST
 --------------------------------
-Latest source: Class1.cs (QuestMods 1.12.0 in this repository)
+Latest source: Class1.cs (QuestMods 1.13.0 in this repository)
 Latest version actually tested by the user: QuestMods 1.11.0 ran on the Quest (log supplied). Colours were confirmed good ("colors are nice"), the local PlayerCharacter resolved but Super Speed still changed no speed ("No readable stat manager on the local character."), and Grabby Hands could still not grab from back hands or pockets.
-Status of 1.12.0: produced and statically checked (tree-sitter parse, balanced braces, no unused private fields) only. It has NOT been compiled by the assistant and has NOT been run on the Quest.
+Status of 1.13.0: produced and statically checked (tree-sitter parse, balanced braces, no unused private fields) only. It has NOT been compiled by the assistant and has NOT been run on the Quest.
 
 WHAT THE 1.10.1 LOG SHOWED (facts, from the user's log)
 -------------------------------------------------------
@@ -29,6 +29,10 @@ WHAT THE 1.11.0 LOG SHOWED (facts, from the user's log)
 - Grabby Hands now reaches the body slots: "target=Back Slot ... Interacting=True held=Bag(Clone)", "target=Pouch Slot Right", "target=Dock MR", "target=StockDock". The unmasked 2.5 m hand sweep is what finds them; the game's own capsule returns 0 colliders in a crowd.
 - Grab by Name was created and tinted but had no keyword: every press logged "No keyword set...", so the feature never ran a scan.
 - The old "Grabby Hands only reaches the forward capsule" failure is gone; the user's remaining complaint is "i still cant grab from other people".
+
+1.13.0 CHANGE
+--------------
+- The user clarified "still cant grab from other people" as: taking a pickup out of another player's worn backpack/pouch. Grabby Hands now checks whether the chosen slot is in the local hand's hierarchy (six ancestor levels); if it is not, the slot belongs to somebody else and Grabby Hands targets the pickup docked inside it (DockedPickup/DockedItem/Docked) instead of the slot, because the game refuses direct interaction with another player's slot. Logs say "that slot belongs to another player; targeting the pickup inside it". The server still decides; nothing is undocked beforehand.
 
 1.12.0 CHANGES
 --------------
