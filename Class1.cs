@@ -1,11 +1,21 @@
-﻿// QuestMods 1.10.1 - existing Questmods mod with experimental developer wheel bridge.
+﻿﻿// QuestMods 1.11.0 - existing Questmods mod with experimental developer wheel bridge.
 // Experimental native 3D nested wheel, not a tablet or rectangular panel.
 // 1.10.0 added a "Super Speed" (5x local speed) toggle beside Grabby Hands and
 // per-action bubble colours (Fly red, Grabby Hands green, Super Speed blue).
-// 1.10.1 broadens every lookup: the speed stat is searched across all stat
+// 1.10.1 broadened every lookup: the speed stat is searched across all stat
 // managers/managers APIs, Grabby Hands attempts far more slots (expanded reach,
 // nearest-slot choice, no silent ownership skips) and bubble colours are
 // overdriven with emission so they read as vivid instead of pastel.
+// 1.11.0 fixes what the 1.10.1 log showed and adds a fourth bubble:
+//   - Super Speed resolves the stat manager through every owner it can find
+//     (character, controller, SmoothLocomotion.Character/character, live
+//     PlayerStatManager/StatManager) and accepts any GetStat-style API, falling
+//     back to scaling the locomotion speed fields when no manager exists.
+//   - Grabby Hands no longer depends on the hand capsule or on PickupDock: it
+//     also sweeps an unmasked sphere around the hand and accepts any slot-like
+//     object, so shop/storage/back and pocket slots are covered.
+//   - New "Grab by Name" bubble (violet): grabs every pickup whose name matches
+//     a keyword, ported from the PC mod's GrabByName.
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -17,7 +27,7 @@ using Il2CppAlta.Api.DataTransferModels.Models.Shared;
 using Il2CppAlta.QuickAccessActions;
 using MelonLoader;
 
-[assembly: MelonInfo(typeof(QuestMods.Mod), "QuestMods", "1.10.1", "you")]
+[assembly: MelonInfo(typeof(QuestMods.Mod), "QuestMods", "1.11.0", "you")]
 [assembly: MelonGame(null, null)]
 
 namespace QuestMods
@@ -30,10 +40,11 @@ namespace QuestMods
 
         public override void OnInitializeMelon()
         {
-            LoggerInstance.Msg("=== QuestMods 1.10.1: experimental Quest Mods wheel ===");
+            LoggerInstance.Msg("=== QuestMods 1.11.0: experimental Quest Mods wheel ===");
             PatchInitializers();
             GrabbyHands.Install(HarmonyInstance);
             SuperSpeed.Install();
+            MelonLogger.Msg("[GrabByName] Keyword file: " + (GrabByName.KeywordPath() ?? "unresolved") + " (one line: an item-name fragment).");
             PatchGetter(typeof(QuickAccessMenuAction), "IsDev", typeof(MenuDevPatch));
             PatchGetter(typeof(UserRoles), nameof(UserRoles.IsDeveloper), typeof(UserRolesPatch));
             PatchGetter(typeof(QuickAccessMenuAction), "IsIgnored", typeof(IgnoredPatch));
@@ -120,6 +131,7 @@ namespace QuestMods
             DebugStateMonitor.SceneLoaded();
             GrabbyHands.SceneLoaded();
             SuperSpeed.SceneLoaded();
+            GrabByName.SceneLoaded();
             BubbleTint.SceneLoaded();
             LoggerInstance.Msg($"Scene loaded: '{sceneName}' ({buildIndex}). {Counts()}");
             try { TabletProbe.SceneLoaded(buildIndex, sceneName); DevWheelBridge.SceneLoaded(); }
@@ -128,7 +140,7 @@ namespace QuestMods
 
         public override void OnUpdate()
         {
-            try { TabletProbe.Tick(); DevWheelBridge.Tick(); DebugStateMonitor.Tick(); GrabbyHands.Tick(); SuperSpeed.Tick(); BubbleTint.Tick(); }
+            try { TabletProbe.Tick(); DevWheelBridge.Tick(); DebugStateMonitor.Tick(); GrabbyHands.Tick(); SuperSpeed.Tick(); GrabByName.Tick(); BubbleTint.Tick(); }
             catch (Exception ex) { LoggerInstance.Warning("Tablet probe tick: " + ex.Message); }
             if (reports >= 12 || DateTime.UtcNow < nextReport) return;
             reports++;
@@ -683,6 +695,27 @@ namespace QuestMods
                         MelonLogger.Warning("[SuperSpeed] Could not create wheel toggle: " + ex);
                     }
                 }
+                if (GrabByName.Available && debugAction != null)
+                {
+                    // Fourth bubble: a one-shot action (no ON/OFF state) that
+                    // grabs every pickup whose name matches the keyword file.
+                    object grabName = null;
+                    try
+                    {
+                        grabName = CreateToggleClone(source, instantiate, spawnedProperty, nestedProperty,
+                                                     debugAction, nameProperty, "Grab by Name");
+                        GrabByName.Register(grabName);
+                        made.Add(grabName);
+                        pages.Add(grabName);
+                        BubbleTint.Register(grabName, "Grab by Name", 0.85f, 0.05f, 1.00f);
+                    }
+                    catch (Exception ex)
+                    {
+                        GrabByName.Unregister(grabName);
+                        if (grabName != null) DestroyClone(grabName);
+                        MelonLogger.Warning("[GrabByName] Could not create wheel action: " + ex);
+                    }
+                }
                 if (debugAction != null)
                     BubbleTint.Register(debugAction, "Fly (Debug Movement)", 1.00f, 0.02f, 0.02f);
                 if (pages.Count == 0) throw new Exception("No mod actions are available; cannot create empty Quest Mods menu.");
@@ -732,6 +765,7 @@ namespace QuestMods
                 {
                     GrabbyHands.Unregister(obj);
                     SuperSpeed.Unregister(obj);
+                    GrabByName.Unregister(obj);
                     BubbleTint.Unregister(obj);
                     DestroyClone(obj);
                 }
@@ -1040,6 +1074,8 @@ namespace QuestMods
             catch { /* never block the game's own menus on our failure */ }
             try { if (!SuperSpeed.BeforeWheelRun(__instance)) return false; }
             catch { }
+            try { if (!GrabByName.BeforeWheelRun(__instance)) return false; }
+            catch { }
             return true;
         }
     }
@@ -1215,8 +1251,15 @@ namespace QuestMods
                 List<KeyValuePair<string, object>> managers = FindStatManagers(character);
                 if (managers.Count == 0)
                 {
+                    if (TryLocomotionSpeed(boosted))
+                    {
+                        locomotionFallbackActive = boosted;
+                        MelonLogger.Msg("[SuperSpeed] " + (boosted ? "ON (5x)" : "OFF") + " applied through the locomotion fallback.");
+                        return true;
+                    }
                     DumpDiagnostics(character, null);
-                    MelonLogger.Warning("[SuperSpeed] No readable stat manager on the local character.");
+                    MelonLogger.Warning("[SuperSpeed] No stat manager found (character.Health=" + Describe(SafeRead(character, "Health")) +
+                        ", locomotion=" + Describe(FindLocomotionOf()) + ").");
                     return false;
                 }
                 float target = boosted ? BoostedSpeed : NormalSpeed;
@@ -1330,11 +1373,17 @@ namespace QuestMods
                 if (boosted)
                 {
                     if (!locomotionOriginals.ContainsKey(key)) locomotionOriginals[key] = value;
-                    if (TrySetFloat(locomotion, name, locomotionOriginals[key] * BoostedSpeed))
+                    // A squared speed field needs its square root scaled by the
+                    // multiplier to yield a 5x linear speed (otherwise it would
+                    // read as 25x).
+                    float factor = lower.Contains("squared") ? (float)Math.Sqrt(BoostedSpeed) : BoostedSpeed;
+                    float scaled = locomotionOriginals[key] * factor;
+                    if (TrySetFloat(locomotion, name, scaled))
                     {
                         if (changed++ < 8)
                             MelonLogger.Msg("[SuperSpeed] Locomotion fallback: " + name + " " +
-                                locomotionOriginals[key].ToString("0.###") + " -> " + (locomotionOriginals[key] * BoostedSpeed).ToString("0.###") + ".");
+                                locomotionOriginals[key].ToString("0.###") + " -> " + scaled.ToString("0.###") +
+                                " (x" + factor.ToString("0.###") + ").");
                     }
                 }
                 else
@@ -1345,6 +1394,13 @@ namespace QuestMods
                 }
             }
             return changed > 0;
+        }
+
+        private static object FindLocomotionOf()
+        {
+            object controller = null;
+            try { controller = controllerCurrent?.GetValue(null); } catch { }
+            return FindLocomotion(controller);
         }
 
         private static object FindLocomotion(object controller)
@@ -1422,36 +1478,158 @@ namespace QuestMods
             return SafeRead(candidate, "Health") != null || SafeRead(candidate, "StatManager") != null ? candidate : null;
         }
 
-        // Every plausible route from the character to a stat manager, so one
-        // wrong member name does not sink the whole feature.
+        // Every plausible route from the character to a stat manager. The
+        // 1.10.1 log showed PlayerCharacter.Health reading null and no
+        // StatManager member on the character, while SmoothLocomotion exposes
+        // Character / character and the assembly carries PlayerStatManager and
+        // IStatManager. So: gather candidate owners, accept anything that can
+        // answer a GetStat-style call, then fall back to live managers.
         private static List<KeyValuePair<string, object>> FindStatManagers(object character)
         {
             var found = new List<KeyValuePair<string, object>>();
             var seen = new HashSet<int>();
-            AddManager(found, seen, SafeRead(character, "StatManager"), "character.StatManager");
-            AddManager(found, seen, SafeRead(character, "Stats"), "character.Stats");
-            foreach (string healthName in new[] { "Health", "health" })
+            var owners = new List<KeyValuePair<string, object>>();
+            object controller = null;
+            try { controller = controllerCurrent?.GetValue(null); } catch { }
+            object player = null;
+            try { player = playerCurrent?.GetValue(null); } catch { }
+
+            AddOwner(owners, character, "character");
+            AddOwner(owners, controller, "controller");
+            object locomotion = FindLocomotion(controller);
+            AddOwner(owners, locomotion, "locomotion");
+            if (locomotion != null)
             {
-                object health = SafeRead(character, healthName);
-                if (health == null) continue;
-                AddManager(found, seen, SafeRead(health, "StatManager"), "Health.StatManager");
-                AddManager(found, seen, SafeRead(health, "Stats"), "Health.Stats");
-                AddManager(found, seen, SafeRead(health, "statManager"), "Health.statManager");
+                AddOwner(owners, SafeRead(locomotion, "Character") ?? SafeRead(locomotion, "character"), "locomotion.Character");
+                AddOwner(owners, SafeRead(locomotion, "CharacterController") ?? SafeRead(locomotion, "characterController"), "locomotion.CharacterController");
+                AddOwner(owners, SafeRead(locomotion, "Controller") ?? SafeRead(locomotion, "controller"), "locomotion.Controller");
             }
-            foreach (string playerName in new[] { "Player", "player" })
+            AddOwner(owners, player, "player");
+            if (player != null)
             {
-                object player = SafeRead(character, playerName);
-                if (player == null) continue;
-                foreach (string inner in new[] { "Character", "PlayerCharacter", "PlayerController", "Controller" })
+                foreach (string inner in new[] { "PlayerCharacter", "playerCharacter", "Character", "character", "PlayerController", "Controller" })
+                    AddOwner(owners, SafeRead(player, inner), "player." + inner);
+            }
+            foreach (KeyValuePair<string, object> owner in owners.ToArray())
+            {
+                AddOwner(owners, SafeRead(owner.Value, "Health") ?? SafeRead(owner.Value, "health"), owner.Key + ".Health");
+                AddOwner(owners, SafeRead(owner.Value, "PlayerCharacter"), owner.Key + ".PlayerCharacter");
+            }
+
+            foreach (KeyValuePair<string, object> owner in owners)
+            {
+                if (owner.Value == null) continue;
+                if (LooksLikeManager(owner.Value)) AddManager(found, seen, owner.Value, owner.Key);
+                foreach (string name in new[] { "StatManager", "statManager", "Stats", "stats", "StatCollection", "statCollection" })
+                    AddManager(found, seen, SafeRead(owner.Value, name), owner.Key + "." + name);
+                ScanStatMembers(found, seen, owner.Value, owner.Key);
+            }
+            AddManagersByType(found, seen);
+            if (found.Count > 0) MelonLogger.Msg("[SuperSpeed] Stat manager candidate(s): " + DescribeManagers(found) + ".");
+            return found;
+        }
+
+        private static void AddOwner(List<KeyValuePair<string, object>> owners, object owner, string label)
+        {
+            if (owner == null) return;
+            int id;
+            try { id = Id(owner); } catch { return; }
+            foreach (KeyValuePair<string, object> existing in owners)
+            {
+                try { if (Id(existing.Value) == id) return; } catch { }
+            }
+            owners.Add(new KeyValuePair<string, object>(label, owner));
+        }
+
+        // Any member whose name mentions "stat" and whose value can answer a
+        // GetStat-style call is a manager. This catches the real member name on
+        // a build where it is not spelled "StatManager".
+        private static void ScanStatMembers(List<KeyValuePair<string, object>> found, HashSet<int> seen, object owner, string label)
+        {
+            var names = new List<string>();
+            try
+            {
+                Type type = owner.GetType();
+                foreach (PropertyInfo property in type.GetProperties(I))
                 {
-                    object related = SafeRead(player, inner);
-                    if (related == null) continue;
-                    AddManager(found, seen, SafeRead(related, "StatManager"), "Player." + inner + ".StatManager");
-                    object health = SafeRead(related, "Health");
-                    AddManager(found, seen, SafeRead(health, "StatManager"), "Player." + inner + ".Health.StatManager");
+                    if (property.GetIndexParameters().Length != 0 || property.GetGetMethod(true) == null) continue;
+                    if (property.Name.IndexOf("stat", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    names.Add(property.Name);
+                }
+                for (Type current = type; current != null; current = current.BaseType)
+                {
+                    foreach (FieldInfo field in current.GetFields(I | BindingFlags.DeclaredOnly))
+                    {
+                        if (field.Name.IndexOf("stat", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                        names.Add(field.Name);
+                    }
                 }
             }
-            return found;
+            catch { }
+            int scanned = 0;
+            foreach (string name in names)
+            {
+                if (scanned++ > 40) break;
+                object value;
+                try { value = SafeRead(owner, name); } catch { continue; }
+                if (value == null) continue;
+                if (LooksLikeManager(value)) { AddManager(found, seen, value, label + "." + name); continue; }
+                if (HasBase(value))
+                {
+                    foreach (string inner in new[] { "Manager", "manager", "StatManager", "statManager", "Owner", "owner" })
+                        AddManager(found, seen, SafeRead(value, inner), label + "." + name + "." + inner);
+                }
+            }
+        }
+
+        private static bool LooksLikeManager(object candidate)
+        {
+            if (candidate == null || candidate is string) return false;
+            try
+            {
+                foreach (MethodInfo method in MethodsIncludingBases(candidate.GetType()))
+                {
+                    if (method.IsStatic) continue;
+                    if (method.Name == "GetStat" || method.Name == "TryGetStat" || method.Name == "GetStatValue" ||
+                        method.Name == "TryGetStatValue") return true;
+                    if (method.Name == "Get" && method.GetParameters().Length == 1) return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        // Last resort: live PlayerStatManager / StatManager instances.
+        private static void AddManagersByType(List<KeyValuePair<string, object>> found, HashSet<int> seen)
+        {
+            foreach (string typeName in new[] { "PlayerStatManager", "StatManager" })
+            {
+                Type type = FindTypeBySimpleName(typeName);
+                if (type == null) continue;
+                foreach (object instance in FindLiveObjects(type))
+                {
+                    if (instance == null || !LooksLikeManager(instance)) continue;
+                    AddManager(found, seen, instance, "live " + typeName);
+                }
+            }
+        }
+
+        private static List<object> FindLiveObjects(Type type)
+        {
+            var result = new List<object>();
+            try
+            {
+                Type unityObject = FindType("UnityEngine.Object");
+                if (unityObject == null || !unityObject.IsAssignableFrom(type)) return result;
+                Type resources = FindType("UnityEngine.Resources");
+                MethodInfo find = resources == null ? null : resources.GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.NonPublic)
+                    .FirstOrDefault(m => m.Name == "FindObjectsOfTypeAll" && m.IsGenericMethodDefinition &&
+                                         m.GetGenericArguments().Length == 1 && m.GetParameters().Length == 0);
+                if (find == null) return result;
+                result.AddRange(DevWheelBridge.ReadArray(find.MakeGenericMethod(type).Invoke(null, null)));
+            }
+            catch (Exception ex) { MelonLogger.Warning("[SuperSpeed] Live " + type.Name + " search failed: " + Detail(ex)); }
+            return result;
         }
 
         private static void AddManager(List<KeyValuePair<string, object>> found, HashSet<int> seen, object manager, string label)
@@ -2328,6 +2506,410 @@ namespace QuestMods
         }
     }
 
+    // "Grab by Name" wheel action, ported from the PC mod's GrabByName: read a
+    // keyword, find every pickup whose name contains it, and grab them through
+    // the local interactor. The keyword lives in
+    // <game>/UserData/questmods_grabname.txt so it can be set from a PC.
+    internal static class GrabByName
+    {
+        private const BindingFlags I = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+        private const BindingFlags S = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+        private const string LabelPrefix = "Grab by Name";
+        private static readonly HashSet<int> ids = new HashSet<int>();
+        private static readonly List<object> held = new List<object>();
+        private static int pending, runLogs;
+        private static string keyword = "";
+        private static DateTime nextKeywordRead = DateTime.MinValue;
+
+        public static bool Available => GrabbyHands.Available;
+
+        public static void Register(object action)
+        {
+            try
+            {
+                int id = Id(action);
+                ids.Add(id);
+                Remember(action);
+                keyword = ReadKeyword() ?? keyword;
+                UpdateLabels();
+                MelonLogger.Msg("[GrabByName] Added wheel action id=" + id + ". Keyword file: " + (KeywordPath() ?? "unresolved") +
+                    " (keyword: '" + keyword + "').");
+            }
+            catch (Exception ex) { MelonLogger.Warning("[GrabByName] Could not register action: " + Detail(ex)); }
+        }
+
+        public static void Unregister(object action)
+        {
+            try
+            {
+                if (action == null) return;
+                ids.Remove(Id(action));
+                held.Remove(action);
+            }
+            catch { }
+        }
+
+        public static void SceneLoaded()
+        {
+            Interlocked.Exchange(ref pending, 0);
+            runLogs = 0;
+            nextKeywordRead = DateTime.MinValue;
+            UpdateLabels();
+        }
+
+        public static bool BeforeWheelRun(object __instance)
+        {
+            bool ours = false;
+            try
+            {
+                if (__instance == null || !ids.Contains(Id(__instance))) return true;
+                string name = SafeRead(__instance, "DisplayName") as string;
+                if (name == null || !name.StartsWith(LabelPrefix, StringComparison.Ordinal)) return true;
+                ours = true;
+                Interlocked.Increment(ref pending);
+                MelonLogger.Msg("[GrabByName] Requested with keyword '" + keyword + "'.");
+            }
+            catch (Exception ex) { MelonLogger.Warning("[GrabByName] Wheel request failed: " + Detail(ex)); }
+            return !ours;
+        }
+
+        public static void Tick()
+        {
+            int requests = Interlocked.Exchange(ref pending, 0);
+            if (DateTime.UtcNow >= nextKeywordRead)
+            {
+                nextKeywordRead = DateTime.UtcNow.AddSeconds(5);
+                string fresh = ReadKeyword();
+                if (fresh != null && fresh != keyword) { keyword = fresh; UpdateLabels(); }
+            }
+            for (int i = 0; i < requests && i < 4; i++)
+            {
+                string active = ReadKeyword();
+                if (active != null) keyword = active;
+                UpdateLabels();
+                if (string.IsNullOrEmpty(keyword))
+                {
+                    MelonLogger.Warning("[GrabByName] No keyword set. Put an item-name fragment in " +
+                        (KeywordPath() ?? "the keyword file") + " (one line, e.g. 'gem').");
+                    continue;
+                }
+                runLogs++;
+                try { GrabMatching(keyword); }
+                catch (Exception ex) { MelonLogger.Warning("[GrabByName] Grab failed: " + Detail(ex)); }
+            }
+        }
+
+        private static void Remember(object action)
+        {
+            if (action == null || held.Contains(action)) return;
+            held.Add(action);
+        }
+
+        // Ported algorithm: local interactor + every pickup whose name contains
+        // the keyword, grabbed through the interactor's own StartInteract.
+        private static void GrabMatching(string needle)
+        {
+            List<object> interactors = GrabbyHands.LocalInteractorObjects();
+            if (interactors.Count == 0)
+            {
+                MelonLogger.Warning("[GrabByName] No local interactor yet. Move a hand once, then press again.");
+                return;
+            }
+            Type pickupType = FindPickupType();
+            var candidates = new List<object>();
+            var seen = new HashSet<int>();
+            if (pickupType != null)
+            {
+                foreach (object live in LiveObjects(pickupType))
+                {
+                    if (live == null) continue;
+                    try { if (seen.Add(Id(live))) candidates.Add(live); } catch { }
+                }
+            }
+            if (candidates.Count == 0)
+            {
+                Type mono = FindType("UnityEngine.MonoBehaviour");
+                if (mono != null)
+                {
+                    foreach (object live in LiveObjects(mono))
+                    {
+                        if (live == null) continue;
+                        bool typed = false;
+                        try { typed = IsPickupTyped(live.GetType()); } catch { }
+                        if (!typed) continue;
+                        try { if (seen.Add(Id(live))) candidates.Add(live); } catch { }
+                    }
+                }
+            }
+            MelonLogger.Msg("[GrabByName] Scanning " + candidates.Count + " pickup object(s) for '" + needle + "'.");
+            int matched = 0, grabbed = 0;
+            foreach (object candidate in candidates)
+            {
+                if (grabbed >= 20) break;
+                string name = SafeRead(candidate, "name") as string;
+                if (name == null || name.IndexOf(needle, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                matched++;
+                if (grabbed < 20 && TryGrab(interactors, candidate, name)) grabbed++;
+            }
+            MelonLogger.Msg("[GrabByName] '" + needle + "': matched " + matched + ", grabbed " + grabbed + ".");
+        }
+
+        private static bool TryGrab(List<object> interactors, object pickup, string name)
+        {
+            foreach (object interactor in interactors)
+            {
+                try
+                {
+                    object busy = SafeRead(interactor, "IsInteracting") ?? SafeRead(interactor, "isInteracting");
+                    if (busy is bool isBusy && isBusy && !IsHeldNow(interactor, pickup)) StopInteract(interactor);
+                    MethodInfo start = StartMethod(interactor, pickup);
+                    if (start == null) continue;
+                    start.Invoke(interactor, BuildArgs(start, pickup));
+                    if (IsHeldNow(interactor, pickup)) { MelonLogger.Msg("[GrabByName] Grabbed '" + name + "'."); return true; }
+                    // Shelf items may stay docked after a plain grab; only then
+                    // is the pickup undocked and the grab retried once.
+                    if (IsDockedNow(pickup) && TryUndock(pickup))
+                    {
+                        start.Invoke(interactor, BuildArgs(start, pickup));
+                        MelonLogger.Msg("[GrabByName] Grabbed '" + name + "' after undocking.");
+                        return true;
+                    }
+                    MelonLogger.Msg("[GrabByName] Sent grab for '" + name + "'.");
+                    return true;
+                }
+                catch (Exception ex) { MelonLogger.Warning("[GrabByName] '" + name + "' failed: " + Detail(ex)); }
+            }
+            return false;
+        }
+
+        private static object[] BuildArgs(MethodInfo method, object pickup)
+        {
+            ParameterInfo[] p = method.GetParameters();
+            var args = new object[p.Length];
+            for (int i = 0; i < p.Length; i++)
+            {
+                Type t = p[i].ParameterType;
+                if (t.IsInstanceOfType(pickup)) args[i] = pickup;
+                else if (t == typeof(bool)) args[i] = false;
+                else if (t == typeof(int)) args[i] = 0;
+                else args[i] = t.IsValueType ? Activator.CreateInstance(t) : null;
+            }
+            return args;
+        }
+
+        private static MethodInfo StartMethod(object interactor, object pickup)
+        {
+            MethodInfo best = null;
+            foreach (MethodInfo method in interactor.GetType().GetMethods(I))
+            {
+                if (method.IsStatic || method.IsAbstract) continue;
+                if (method.Name != "StartInteract" && method.Name != "TryStartInteract" && method.Name != "Interact") continue;
+                ParameterInfo[] p = method.GetParameters();
+                if (p.Length == 0 || !p[0].ParameterType.IsInstanceOfType(pickup)) continue;
+                if (method.Name == "StartInteract" && p.Length == 4) return method;
+                if (best == null) best = method;
+            }
+            return best;
+        }
+
+        private static void StopInteract(object interactor)
+        {
+            try
+            {
+                MethodInfo stop = interactor.GetType().GetMethods(I).FirstOrDefault(m =>
+                    !m.IsStatic && m.Name == "StopInteract" && m.GetParameters().Length == 0);
+                stop?.Invoke(interactor, null);
+            }
+            catch { }
+        }
+
+        private static bool TryUndock(object pickup)
+        {
+            try
+            {
+                foreach (MethodInfo method in pickup.GetType().GetMethods(I))
+                {
+                    if (method.IsStatic || method.GetParameters().Length != 0) continue;
+                    if (method.Name != "Undock" && method.Name != "TryUndock" && method.Name != "ForceUndock") continue;
+                    object result = method.Invoke(pickup, null);
+                    return !(result is bool ok) || ok;
+                }
+                object dock = SafeRead(pickup, "Dock");
+                if (dock == null) return false;
+                foreach (MethodInfo method in dock.GetType().GetMethods(I))
+                {
+                    if (method.IsStatic || method.Name != "Undock" || method.GetParameters().Length != 0) continue;
+                    object result = method.Invoke(dock, null);
+                    return !(result is bool ok) || ok;
+                }
+            }
+            catch (Exception ex) { MelonLogger.Warning("[GrabByName] Undock failed: " + Detail(ex)); }
+            return false;
+        }
+
+        private static bool IsHeldNow(object interactor, object pickup)
+        {
+            object current = SafeRead(interactor, "CurrentInteractable") ?? SafeRead(interactor, "currentInteractable") ??
+                             SafeRead(interactor, "Held") ?? SafeRead(interactor, "held");
+            if (current == null) return false;
+            try { return Id(current) == Id(pickup); } catch { return false; }
+        }
+
+        private static bool IsDockedNow(object pickup)
+        {
+            object docked = SafeRead(pickup, "IsDocked");
+            if (docked is bool flag) return flag;
+            return SafeRead(pickup, "Dock") != null;
+        }
+
+        private static Type FindPickupType()
+        {
+            foreach (Type type in GrabbyHands.PickupTypeCandidates())
+            {
+                if (type != null && type.Name == "Pickup") return type;
+            }
+            foreach (Type type in GrabbyHands.PickupTypeCandidates())
+            {
+                if (type != null) return type;
+            }
+            return FindType("Pickup");
+        }
+
+        private static bool IsPickupTyped(Type type)
+        {
+            int depth = 0;
+            for (Type current = type; current != null && depth < 12; current = current.BaseType, depth++)
+            {
+                if (current.Name == "Pickup") return true;
+            }
+            return false;
+        }
+
+        private static List<object> LiveObjects(Type type)
+        {
+            var result = new List<object>();
+            try
+            {
+                Type unityObject = FindType("UnityEngine.Object");
+                if (unityObject == null || !unityObject.IsAssignableFrom(type)) return result;
+                Type resources = FindType("UnityEngine.Resources");
+                MethodInfo find = resources == null ? null : resources.GetMethods(S)
+                    .FirstOrDefault(m => m.Name == "FindObjectsOfTypeAll" && m.IsGenericMethodDefinition &&
+                                         m.GetGenericArguments().Length == 1 && m.GetParameters().Length == 0);
+                if (find == null) return result;
+                result.AddRange(DevWheelBridge.ReadArray(find.MakeGenericMethod(type).Invoke(null, null)));
+            }
+            catch (Exception ex) { MelonLogger.Warning("[GrabByName] Object scan failed for " + type.Name + ": " + Detail(ex)); }
+            return result;
+        }
+
+        private static string ReadKeyword()
+        {
+            try
+            {
+                string path = KeywordPath();
+                if (path == null)
+                {
+                    if (runLogs == 0) MelonLogger.Msg("[GrabByName] Could not resolve the game folder for the keyword file.");
+                    return null;
+                }
+                if (!System.IO.File.Exists(path))
+                {
+                    if (runLogs == 0) MelonLogger.Msg("[GrabByName] No keyword file yet; create " + path + " containing one item-name fragment.");
+                    return null;
+                }
+                foreach (string raw in System.IO.File.ReadAllLines(path))
+                {
+                    string line = raw.Trim();
+                    if (line.Length == 0 || line.StartsWith("#")) continue;
+                    return line.Length > 48 ? line.Substring(0, 48) : line;
+                }
+            }
+            catch (Exception ex) { MelonLogger.Warning("[GrabByName] Could not read keyword file: " + Detail(ex)); }
+            return null;
+        }
+
+        internal static string KeywordPath()
+        {
+            try
+            {
+                string location = null;
+                try { location = Assembly.GetExecutingAssembly().Location; } catch { }
+                string mods = string.IsNullOrEmpty(location) ? null : System.IO.Path.GetDirectoryName(location);
+                string root = string.IsNullOrEmpty(mods) ? null : System.IO.Path.GetDirectoryName(mods);
+                if (string.IsNullOrEmpty(root)) return null;
+                return System.IO.Path.Combine(System.IO.Path.Combine(root, "UserData"), "questmods_grabname.txt");
+            }
+            catch { return null; }
+        }
+
+        private static void UpdateLabels()
+        {
+            string suffix = string.IsNullOrEmpty(keyword) ? " (set keyword file)" :
+                " '" + (keyword.Length > 16 ? keyword.Substring(0, 16) : keyword) + "'";
+            PropertyInfo property = typeof(QuickAccessMenuAction).GetProperty("displayName", I);
+            foreach (object action in held)
+            {
+                try { if (property?.GetSetMethod(true) != null) property.SetValue(action, LabelPrefix + suffix); }
+                catch (Exception ex) { MelonLogger.Warning("[GrabByName] Could not refresh label: " + Detail(ex)); }
+            }
+        }
+
+        private static object SafeRead(object obj, string name)
+        {
+            if (obj == null) return null;
+            try
+            {
+                Type type = obj.GetType();
+                PropertyInfo property = type.GetProperty(name, I);
+                if (property != null && property.GetGetMethod(true) != null && property.GetIndexParameters().Length == 0)
+                    return property.GetValue(obj);
+                for (Type current = type; current != null; current = current.BaseType)
+                {
+                    FieldInfo field = current.GetField(name, I | BindingFlags.DeclaredOnly);
+                    if (field != null) return field.GetValue(obj);
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static int Id(object obj)
+        {
+            if (obj == null) throw new Exception("null Unity object");
+            MethodInfo method = obj.GetType().GetMethod("GetInstanceID", I, null, Type.EmptyTypes, null);
+            if (method == null) throw new Exception("GetInstanceID unavailable on " + obj.GetType().FullName);
+            return Convert.ToInt32(method.Invoke(obj, null));
+        }
+
+        private static Type FindType(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return null;
+            foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                Type type = assembly.GetType(name, false);
+                if (type != null) return type;
+            }
+            string shortName = name.Substring(name.LastIndexOf('.') + 1);
+            foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                try
+                {
+                    Type type = assembly.GetTypes().FirstOrDefault(t => t.Name == shortName);
+                    if (type != null) return type;
+                }
+                catch { }
+            }
+            return null;
+        }
+
+        private static string Detail(Exception ex)
+        {
+            if (ex is TargetInvocationException && ex.InnerException != null) ex = ex.InnerException;
+            return ex.GetType().Name + ": " + ex.Message;
+        }
+    }
+
     // No custom board or Unity objects. The wheel item and the grab hook are
     // experimental; actual native call dispatch varies between Quest builds.
     internal static class GrabbyHands
@@ -2339,6 +2921,7 @@ namespace QuestMods
         private static readonly List<object> localHandTransforms = new List<object>();
         private static readonly HashSet<int> localControllerIds = new HashSet<int>();
         private static readonly HashSet<int> localInteractorIds = new HashSet<int>();
+        private static readonly List<object> localInteractors = new List<object>();
         private static readonly List<Type> pickupTypes = new List<Type>();
         private static int ownershipLogs;
         private static bool ready, enabled, grabScanDone, wheelHookAttempted;
@@ -2469,6 +3052,7 @@ namespace QuestMods
             actions.Clear();
             localHandTransforms.Clear();
             localControllerIds.Clear(); localInteractorIds.Clear();
+            localInteractors.Clear();
             // Keep IDs for still-live clones; also check their exact label before
             // suppressing spawn, guarding against ID reuse on a different action.
         }
@@ -2501,7 +3085,17 @@ namespace QuestMods
             bool added = localControllerIds.Add(cid);
             object interactor = SafeRead(controller, "Interactor") ?? SafeRead(controller, "interactor");
             int iid = 0;
-            if (interactor != null) { iid = Id(interactor); localInteractorIds.Add(iid); }
+            if (interactor != null)
+            {
+                iid = Id(interactor);
+                localInteractorIds.Add(iid);
+                bool known = false;
+                foreach (object existing in localInteractors)
+                {
+                    try { if (Id(existing) == iid) { known = true; break; } } catch { }
+                }
+                if (!known) localInteractors.Add(interactor);
+            }
             if (added) MelonLogger.Msg("[GrabbyHands] Local controller from " + source + ": controller=" + cid + " interactor=" + (iid == 0 ? "unavailable" : iid.ToString()));
         }
         private static void RememberCurrentPlayerControllers()
@@ -2669,61 +3263,54 @@ namespace QuestMods
                     }
                 }
                 if (colliders == null || colliders.Count == 0)
-                { HoldLog("no overlap found, even with an expanded capsule (" + (countObj ?? "null") + ")"); return true; }
+                {
+                    // Not fatal: the unmasked hand sweep below still runs.
+                    HoldLog("no overlap found, even with an expanded capsule (" + (countObj ?? "null") + "); trying the hand sweep");
+                    colliders = new List<object>();
+                }
                 MethodInfo getInteractable = component.MakeGenericMethod(interactableType);
                 var unique = new Dictionary<int, object>();
-                foreach (object collider in colliders)
-                {
-                    if (collider == null) continue;
-                    object item = getInteractable.Invoke(null, new object[] { collider });
-                    if (item == null) continue;
-                    unique[Id(item)] = item;
-                }
-                if (unique.Count == 0) { HoldLog("no interactable component in the overlap"); return true; }
-                // Classify everything that was hit. A dock and the pickup docked
-                // in it are one logical target; several slots at once now resolve
-                // to the nearest one instead of being refused outright.
-                var docks = new List<object>();
+                AddInteractables(unique, colliders, getInteractable, interactableType);
+                var slots = new List<object>();
                 var dockedPickups = new List<object>();
                 var otherNames = new List<string>();
-                foreach (object item in unique.Values)
+                Classify(unique, dockType, slots, dockedPickups, otherNames);
+                if (slots.Count == 0 && dockedPickups.Count == 0)
                 {
-                    object itemDock = QuestModsMenu.TryCast(item, dockType);
-                    if (itemDock != null) { docks.Add(itemDock); continue; }
-                    object itemPickup = null;
-                    foreach (Type pickupType in pickupTypes)
+                    // Nothing usable at the game's own reach. Sweep around the
+                    // hand without the interactor's collision mask and accept
+                    // ANY slot-like object (shop, storage, backpack, pockets),
+                    // not only things castable to PickupDock.
+                    List<object> nearby = FindNearbyColliders(__instance, 2.5f);
+                    if (nearby != null && nearby.Count > 0)
                     {
-                        object possible = QuestModsMenu.TryCast(item, pickupType);
-                        if (possible != null) { itemPickup = possible; break; }
+                        var extra = new Dictionary<int, object>();
+                        AddInteractables(extra, nearby, getInteractable, interactableType);
+                        int before = slots.Count + dockedPickups.Count;
+                        Classify(extra, dockType, slots, dockedPickups, otherNames);
+                        HoldLog("hand sweep found " + extra.Count + " interactable(s), " +
+                            (slots.Count + dockedPickups.Count - before) + " slot-like");
                     }
-                    // Only a pickup that belongs to a slot is treated as slot
-                    // content; loose items are left to the normal native grab.
-                    bool inSlot = false;
-                    if (itemPickup != null)
-                        inSlot = (SafeRead(itemPickup, "IsDocked") is bool isDocked && isDocked) ||
-                                 SafeRead(itemPickup, "Dock") != null;
-                    if (inSlot) dockedPickups.Add(itemPickup);
-                    else otherNames.Add((SafeRead(item, "name") ?? "unknown").ToString());
                 }
                 object target = null;
                 object chosenDock = null;
-                if (docks.Count > 0)
+                if (slots.Count > 0)
                 {
-                    chosenDock = Nearest(__instance, docks);
+                    chosenDock = Nearest(__instance, slots);
                     target = chosenDock;
-                    if (docks.Count > 1) HoldLog("multiple slots overlapped; chose the nearest of " + docks.Count);
+                    if (slots.Count > 1) HoldLog("multiple slots overlapped; chose the nearest of " + slots.Count);
                 }
                 else if (dockedPickups.Count > 0)
                 {
                     object pickupTarget = Nearest(__instance, dockedPickups);
                     target = pickupTarget;
                     object rawDock = SafeRead(pickupTarget, "Dock");
-                    chosenDock = rawDock == null ? null : QuestModsMenu.TryCast(rawDock, dockType);
+                    chosenDock = rawDock != null && IsSlotLike(rawDock, dockType) ? rawDock : null;
                     if (dockedPickups.Count > 1) HoldLog("multiple docked pickups overlapped; chose the nearest of " + dockedPickups.Count);
                 }
                 else
                 {
-                    HoldLog("overlap holds no slot-like interactable (" +
+                    HoldLog("no slot-like interactable in reach (" +
                         (otherNames.Count == 0 ? "none" : string.Join(", ", otherNames.ToArray())) + "); native grab continues");
                     return true;
                 }
@@ -2870,6 +3457,133 @@ namespace QuestMods
                 return true;
             }
             catch { return false; }
+        }
+
+        // Collect interactables from a collider list: the game's own lookup
+        // first, then a component search that walks up the hierarchy (many slot
+        // colliders sit on children of the interactable).
+        private static void AddInteractables(Dictionary<int, object> unique, List<object> colliders, MethodInfo getInteractable, Type interactableType)
+        {
+            foreach (object collider in colliders)
+            {
+                if (collider == null) continue;
+                object item = null;
+                try { item = getInteractable.Invoke(null, new object[] { collider }); } catch { }
+                if (item == null) item = FindComponentUpwards(collider, interactableType, true);
+                if (item == null) item = FindComponentUpwards(collider, interactableType, false);
+                if (item == null) continue;
+                try { unique[Id(item)] = item; } catch { }
+            }
+        }
+
+        private static object FindComponentUpwards(object component, Type type, bool inParent)
+        {
+            string name = inParent ? "GetComponentInParent" : "GetComponent";
+            try
+            {
+                foreach (MethodInfo method in component.GetType().GetMethods(I).Where(m => m.Name == name && !m.IsStatic))
+                {
+                    ParameterInfo[] p = method.GetParameters();
+                    if (p.Length == 1 && p[0].ParameterType == typeof(Type))
+                    {
+                        try { object found = method.Invoke(component, new object[] { type }); if (found != null) return found; } catch { }
+                    }
+                    else if (p.Length == 0 && method.IsGenericMethodDefinition)
+                    {
+                        try { object found = method.MakeGenericMethod(type).Invoke(component, null); if (found != null) return found; } catch { }
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        // Unmasked Physics.OverlapSphere around the hand, used only when the
+        // game's own reach returned nothing usable.
+        private static List<object> FindNearbyColliders(object interactor, float radius)
+        {
+            try
+            {
+                object trigger = SafeRead(interactor, "triggerObjectTransform") ?? SafeRead(interactor, "transform");
+                object center = SafeRead(trigger, "position");
+                if (center == null) return null;
+                Type physics = null;
+                foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    physics = assembly.GetType("UnityEngine.Physics", false);
+                    if (physics != null) break;
+                }
+                if (physics == null) return null;
+                MethodInfo sphere = physics.GetMethods(S).FirstOrDefault(m =>
+                {
+                    ParameterInfo[] p = m.GetParameters();
+                    return m.Name == "OverlapSphere" && m.ReturnType != typeof(void) && p.Length == 2 &&
+                           p[0].ParameterType == center.GetType() && p[1].ParameterType == typeof(float);
+                });
+                if (sphere == null) return null;
+                object result = sphere.Invoke(null, new object[] { center, radius });
+                return result == null ? null : DevWheelBridge.ReadArray(result);
+            }
+            catch (Exception ex) { HoldLog("hand sweep failed: " + Detail(ex)); return null; }
+        }
+
+        private static void Classify(Dictionary<int, object> unique, Type dockType, List<object> slots, List<object> pickups, List<string> otherNames)
+        {
+            foreach (object item in unique.Values)
+            {
+                if (item == null) continue;
+                if (IsSlotLike(item, dockType)) { AddUnique(slots, item); continue; }
+                object dockedFlag = SafeRead(item, "IsDocked");
+                bool dockedNow = dockedFlag is bool docked && docked;
+                if (dockedNow || SafeRead(item, "Dock") != null) { AddUnique(pickups, item); continue; }
+                string name = (SafeRead(item, "name") ?? "unknown").ToString();
+                if (!otherNames.Contains(name)) otherNames.Add(name);
+            }
+        }
+
+        // A slot is anything with docked content, whatever its concrete type:
+        // PickupDock, StockDock, backpack/pocket slots, ...
+        private static bool IsSlotLike(object item, Type dockType)
+        {
+            if (item == null) return false;
+            try { if (dockType != null && QuestModsMenu.TryCast(item, dockType) != null) return true; } catch { }
+            return SafeRead(item, "DockedPickup") != null || SafeRead(item, "HasDockedPickup") != null ||
+                   SafeRead(item, "QuantityStored") != null || SafeRead(item, "DockedItem") != null;
+        }
+
+        private static void AddUnique(List<object> list, object item)
+        {
+            try
+            {
+                int id = Id(item);
+                foreach (object existing in list)
+                {
+                    try { if (Id(existing) == id) return; } catch { }
+                }
+            }
+            catch { return; }
+            list.Add(item);
+        }
+
+        // Interactors seen for the local player, exposed for Grab by Name.
+        internal static List<object> LocalInteractorObjects()
+        {
+            var result = new List<object>();
+            foreach (object interactor in localInteractors)
+            {
+                if (interactor != null) result.Add(interactor);
+            }
+            return result;
+        }
+
+        internal static List<Type> PickupTypeCandidates()
+        {
+            var result = new List<Type>();
+            foreach (Type type in pickupTypes)
+            {
+                if (type != null) result.Add(type);
+            }
+            return result;
         }
 
         private static void HoldLog(string message)

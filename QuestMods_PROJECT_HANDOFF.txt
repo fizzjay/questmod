@@ -9,9 +9,39 @@ This is a handoff for a developer or future AI assistant working on this project
 
 CURRENT STATUS — READ THIS FIRST
 --------------------------------
-Latest source: Class1.cs (QuestMods 1.10.1 in this repository)
-Latest version actually tested by the user: QuestMods 1.10.0 ran on the Quest (log supplied). Grabby Hands partially worked, Super Speed did not change speed, bubble colours appeared but washed out/pastel.
-Status of 1.10.1: produced and statically checked for balanced delimiters and parse errors only. It has NOT been compiled by the assistant and has NOT been run on the Quest.
+Latest source: Class1.cs (QuestMods 1.11.0 in this repository)
+Latest version actually tested by the user: QuestMods 1.10.1 ran on the Quest (log supplied). Colours were confirmed good ("colors are nice"), the local PlayerCharacter resolved but Super Speed still changed no speed ("No readable stat manager on the local character."), and Grabby Hands could still not grab from back hands or pockets.
+Status of 1.11.0: produced and statically checked (tree-sitter parse, balanced braces, no unused private fields) only. It has NOT been compiled by the assistant and has NOT been run on the Quest.
+
+WHAT THE 1.10.1 LOG SHOWED (facts, from the user's log)
+-------------------------------------------------------
+- Local character resolves: "Local character type=Il2CppAlta.Character.PlayerCharacter, controller type=Il2Cpp.PlayerController, Player.Current=True". Character members seen: nonBakedCharacterRenderer, Health (property, read null twice), healthTarget. No StatManager member.
+- Diagnostics reported manager=null, then "No readable stat manager on the local character." and "Speed change was not applied; toggle state left unchanged." on every tap.
+- The locomotion proxy is Il2Cpp.SmoothLocomotion and exposes character (prop), Character (prop), characterController, characterTransform, clampedSpeedSquared, currentBuildupSpeed, hungerStat, fullnessStat.
+- Type names present in the assembly: IStatManager, Stat, PlayerStatManager, StatManager, StatManagerSaveData, StatManagerSaveData1, StatManagerSaveDataStat, PlayerCharacterTarget, PlayerCharacterCustomizationManager, PlayerCharacter.
+- Colours are approved: "Tinted ... via _Color/_EmissionColor (shader Township Tale/Cheap/SimpleStandard, gain x2.2)". Do not change the tint path.
+- Grabby Hands successes were forward reach only ("target=Dock ... held=Smelter Gem 2(Clone)", "target=StockDock ... held=Soft Fabric Large Roll(Clone)"). Failures were "expanded overlap x1.8/x3: 1-2 collider(s)" followed by "no interactable component in the overlap", and "overlap holds no slot-like interactable (Grab)": the back/hip slots are not inside the hand capsule at any radius, so widening the capsule could never reach them.
+
+1.11.0 CHANGES
+--------------
+Super Speed (fixes "no stat manager"):
+- Candidate owners are now gathered from the character, PlayerController.Current, the smooth-locomotion proxy and its Character/character/CharacterController members, Player.Current and each of its character/controller members, plus each owner's Health.
+- A candidate counts as a stat manager if it can answer a GetStat-style call (GetStat, TryGetStat, GetStatValue, TryGetStatValue, Get(key)) whatever its member is called; every member whose name contains "stat" is scanned, and a Stat proxy's back-reference (Manager/Owner) is followed.
+- Last resort: live PlayerStatManager / StatManager instances from Resources.FindObjectsOfTypeAll, filtered the same way.
+- If no manager exists at all, the locomotion route now runs instead of giving up: speed-named Stat proxies get Base written, plain float members are scaled x5 (a name containing "squared" is scaled by sqrt(5) so the linear speed is 5x, not 25x), originals are restored on OFF and re-applied every 500 ms while ON.
+- The failure line now reports character.Health and the locomotion proxy type so the next log is actionable.
+
+Grabby Hands (fixes "back hands or pockets"):
+- Slot detection no longer requires a PickupDock cast. Anything answering DockedPickup / HasDockedPickup / QuantityStored / DockedItem counts as a slot, so shop, stock, backpack and pocket slots all qualify.
+- Interactable resolution falls back to GetComponentInParent/GetComponent when the game's own collider lookup returns nothing.
+- When the expanded capsule still finds no usable slot, an unmasked Physics.OverlapSphere (2.5 m) around the hand is swept and every interactable in it is classified the same way. The "no overlap" case no longer aborts before that sweep.
+- Still never undocks and never guesses between slots: the nearest slot is chosen and the game's own confirmation decides.
+
+Grab by Name (new, fourth bubble, violet 0.85/0.05/1.00):
+- Port of the PC mod's GrabByName/IsPickupTyped: find the local interactor(s) recorded by Grabby Hands, enumerate live pickups (Resources.FindObjectsOfTypeAll of the Pickup type, or a MonoBehaviour scan filtered by a base-type walk to a type named "Pickup"), keep those whose name contains the keyword (case-insensitive), then call the interactor's own StartInteract(pickup, false, false, false).
+- Stops an existing interaction first; only undocks and retries once if the pickup is still docked after the plain grab (per the standing rule that the native grab goes first).
+- Limited to 20 grabs per press, logs scanned/matched/grabbed counts, and is a one-shot action, not a toggle.
+- The keyword is read from <quest data folder>/UserData/questmods_grabname.txt (one line, '#' comments allowed) and the bubble label shows it. The path is logged at startup and on the first press.
 
 WHAT THE 1.10.0 LOG SHOWED (facts, from the user's log)
 -------------------------------------------------------
