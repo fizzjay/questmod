@@ -1,4 +1,4 @@
-﻿// QuestMods 1.12.0 - mod wheel ("Quest Mods") for the Quest port of A Township Tale.
+﻿// QuestMods 1.14.0 - mod wheel ("Quest Mods") for the Quest port of A Township Tale.
 // 1.10.0 added a "Super Speed" (5x local speed) toggle beside Grabby Hands and
 // per-action bubble colours (Fly red, Grabby Hands green, Super Speed blue).
 // 1.10.1 broadened every lookup. 1.11.0 fixed the speed stat route (it now
@@ -7,14 +7,17 @@
 // 1.13.0 lets Grabby Hands reach into another player's worn backpack or pouch:
 // the slot is detected as foreign (not in the local hand's hierarchy) and the
 // pickup docked inside it is targeted instead of the slot itself.
-// 1.12.0 turns the grab-by-name bubble into a three-item group:
-//   - "Grab by Name" grabs matching pickups (amount from its own wheel item),
-//   - "Type Keyword" spawns the platform keyboard (UnityEngine.TouchScreenKeyboard)
-//     so the keyword can be typed in headset, and saves it to UserData,
-//   - "Grab Amount" cycles 1 / 5 / 10 / 20 / 40 / 100 pickups per press.
-// Grabby Hands now also reports the owner of the slot it chose (for slots worn
-// by other players) and Super Speed no longer floods the log with every live
-// StatManager.
+// 1.14.0 replaces the failed platform keyboard with the mod's own in-world
+// keyboard (class QuestKeyboard) and folds everything back into ONE bubble:
+//   - pressing "Grab by Name" spawns a small board in front of the hand,
+//   - the hand's forward ray highlights the key it points at (every key is
+//     a real cube collider with a small TextMesh label on it),
+//   - the trigger - read from the game's own PlayerInput - presses that key,
+//   - the top bar shows the text being typed, the bar under it is the amount
+//     field: press it and the digits go into the amount instead,
+//   - OK grabs, ESC closes, and a blank amount means "every match".
+// If the board cannot be built the bubble falls back to the stored keyword
+// file, so nothing regresses into a dead button.
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -26,7 +29,7 @@ using Il2CppAlta.Api.DataTransferModels.Models.Shared;
 using Il2CppAlta.QuickAccessActions;
 using MelonLoader;
 
-[assembly: MelonInfo(typeof(QuestMods.Mod), "QuestMods", "1.13.0", "you")]
+[assembly: MelonInfo(typeof(QuestMods.Mod), "QuestMods", "1.14.0", "you")]
 [assembly: MelonGame(null, null)]
 
 namespace QuestMods
@@ -39,11 +42,11 @@ namespace QuestMods
 
         public override void OnInitializeMelon()
         {
-            LoggerInstance.Msg("=== QuestMods 1.13.0: experimental Quest Mods wheel ===");
+            LoggerInstance.Msg("=== QuestMods 1.14.0: experimental Quest Mods wheel ===");
             PatchInitializers();
             GrabbyHands.Install(HarmonyInstance);
             SuperSpeed.Install();
-            MelonLogger.Msg("[GrabByName] Keyword file: " + (GrabByName.KeywordPath() ?? "unresolved") + " (one line: an item-name fragment).");
+            MelonLogger.Msg("[GrabByName] Keyword file: " + (GrabByName.KeywordPath() ?? "unresolved") + " (fallback if the in-world keyboard cannot be built).");
             PatchGetter(typeof(QuickAccessMenuAction), "IsDev", typeof(MenuDevPatch));
             PatchGetter(typeof(UserRoles), nameof(UserRoles.IsDeveloper), typeof(UserRolesPatch));
             PatchGetter(typeof(QuickAccessMenuAction), "IsIgnored", typeof(IgnoredPatch));
@@ -139,7 +142,7 @@ namespace QuestMods
 
         public override void OnUpdate()
         {
-            try { TabletProbe.Tick(); DevWheelBridge.Tick(); DebugStateMonitor.Tick(); GrabbyHands.Tick(); SuperSpeed.Tick(); GrabByName.Tick(); BubbleTint.Tick(); }
+            try { TabletProbe.Tick(); DevWheelBridge.Tick(); DebugStateMonitor.Tick(); GrabbyHands.Tick(); SuperSpeed.Tick(); GrabByName.Tick(); QuestKeyboard.Tick(); BubbleTint.Tick(); }
             catch (Exception ex) { LoggerInstance.Warning("Tablet probe tick: " + ex.Message); }
             if (reports >= 12 || DateTime.UtcNow < nextReport) return;
             reports++;
@@ -696,17 +699,24 @@ namespace QuestMods
                 }
                 if (GrabByName.Available && debugAction != null)
                 {
-                    // Grab group: one action that grabs, one that opens the
-                    // keyboard for the keyword, one that cycles the amount.
-                    CreateGrabItem(source, instantiate, spawnedProperty, nestedProperty, debugAction, nameProperty,
-                                   made, pages, GrabByName.KindRun, "Grab by Name", "Grab by Name (one shot)",
-                                   0.85f, 0.05f, 1.00f);
-                    CreateGrabItem(source, instantiate, spawnedProperty, nestedProperty, debugAction, nameProperty,
-                                   made, pages, GrabByName.KindType, "Type Keyword", "Type Keyword (keyboard)",
-                                   1.00f, 0.10f, 0.75f);
-                    CreateGrabItem(source, instantiate, spawnedProperty, nestedProperty, debugAction, nameProperty,
-                                   made, pages, GrabByName.KindAmount, "Grab Amount: 10", "Grab Amount",
-                                   0.05f, 0.90f, 0.95f);
+                    // ONE bubble. Pressing it opens the mod's own in-world
+                    // keyboard, where the name and the amount are typed.
+                    object grab = null;
+                    try
+                    {
+                        grab = CreateToggleClone(source, instantiate, spawnedProperty, nestedProperty,
+                                                 debugAction, nameProperty, "Grab by Name");
+                        GrabByName.Register(grab);
+                        made.Add(grab);
+                        pages.Add(grab);
+                        BubbleTint.Register(grab, "Grab by Name (keyboard)", 0.85f, 0.05f, 1.00f);
+                    }
+                    catch (Exception ex)
+                    {
+                        GrabByName.Unregister(grab);
+                        if (grab != null) DestroyClone(grab);
+                        MelonLogger.Warning("[GrabByName] Could not create the wheel bubble: " + ex);
+                    }
                 }
                 if (debugAction != null)
                     BubbleTint.Register(debugAction, "Fly (Debug Movement)", 1.00f, 0.02f, 0.02f);
@@ -932,32 +942,6 @@ namespace QuestMods
                 }
             }
             return null;
-        }
-
-        // One "Grab by Name" wheel item: a clone of the native debug action that
-        // is routed to GrabByName by its own label and instance id.
-        private static object CreateGrabItem(object source, MethodInfo instantiate, PropertyInfo spawnedProperty,
-                                             PropertyInfo nestedProperty, object fallbackChild, PropertyInfo nameProperty,
-                                             List<object> made, List<object> pages, int kind, string label,
-                                             string tintLabel, float red, float green, float blue)
-        {
-            object action = null;
-            try
-            {
-                action = CreateToggleClone(source, instantiate, spawnedProperty, nestedProperty,
-                                           fallbackChild, nameProperty, label);
-                GrabByName.Register(action, kind);
-                made.Add(action);
-                pages.Add(action);
-                BubbleTint.Register(action, tintLabel, red, green, blue);
-            }
-            catch (Exception ex)
-            {
-                GrabByName.Unregister(action);
-                if (action != null) DestroyClone(action);
-                MelonLogger.Warning("[GrabByName] Could not create '" + label + "': " + ex);
-            }
-            return action;
         }
 
         private static void DestroyClone(object obj)
@@ -2527,50 +2511,39 @@ namespace QuestMods
         }
     }
 
-    // "Grab by Name" wheel group, ported from the PC mod's GrabByName:
-    // a keyword, a grab amount, and the grab itself. Three wheel items share this
-    // class: "Grab by Name" runs it, "Type Keyword" opens the platform keyboard,
-    // "Grab Amount" cycles how many pickups one press may take.
+    // "Grab by Name", ported from the PC mod's GrabByName. One wheel bubble:
+    // pressing it opens the in-headset keyboard (QuestKeyboard below) and the
+    // typed keyword plus optional amount are used to grab matching pickups
+    // through the local interactor. A keyword can also be pre-set in
+    // UserData/questmods_grabname.txt when the keyboard cannot be built.
     internal static class GrabByName
     {
         private const BindingFlags I = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
         private const BindingFlags S = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
-        public const int KindRun = 0;
-        public const int KindType = 1;
-        public const int KindAmount = 2;
-        private const string RunLabel = "Grab by Name";
-        private const string TypeLabel = "Type Keyword";
-        private const string AmountLabel = "Grab Amount";
-        private static readonly int[] AmountSteps = { 1, 5, 10, 20, 40, 100 };
-
-        private static readonly Dictionary<int, int> kinds = new Dictionary<int, int>();
+        private const string LabelPrefix = "Grab by Name";
+        private static readonly HashSet<int> ids = new HashSet<int>();
         private static readonly List<object> actions = new List<object>();
-        private static int amount = 10;
-        private static int pendingKind = -1;
-        private static int missingFileLogged;
-        private static int keyboardLogs;
+        private static int pending, missingFileLogged, keywordLogs;
+        private static int amount;              // 0 (or missing) means "all"
         private static string keyword = "";
-        private static DateTime nextKeywordRead = DateTime.MinValue;
-        private static object keyboard;
-        private static bool keyboardOpen;
 
         public static bool Available => GrabbyHands.Available;
 
-        public static void Register(object action, int kind)
+        public static void Register(object action)
         {
             try
             {
                 int id = Id(action);
-                kinds[id] = kind;
+                ids.Add(id);
                 if (!actions.Contains(action)) actions.Add(action);
                 string stored = ReadKeyword();
                 if (stored != null) keyword = stored;
                 amount = ReadAmount();
                 UpdateLabels();
-                MelonLogger.Msg("[GrabByName] Added wheel item id=" + id + " (" + KindName(kind) + "); keyword '" +
-                    keyword + "', amount " + amount + ", file " + (KeywordPath() ?? "unresolved") + ".");
+                MelonLogger.Msg("[GrabByName] Added wheel bubble id=" + id + "; stored keyword '" + keyword +
+                    "', amount " + (amount <= 0 ? "all" : amount.ToString()) + ", file " + (KeywordPath() ?? "unresolved") + ".");
             }
-            catch (Exception ex) { MelonLogger.Warning("[GrabByName] Could not register item: " + Detail(ex)); }
+            catch (Exception ex) { MelonLogger.Warning("[GrabByName] Could not register bubble: " + Detail(ex)); }
         }
 
         public static void Unregister(object action)
@@ -2578,7 +2551,7 @@ namespace QuestMods
             try
             {
                 if (action == null) return;
-                kinds.Remove(Id(action));
+                ids.Remove(Id(action));
                 actions.Remove(action);
             }
             catch { }
@@ -2586,35 +2559,26 @@ namespace QuestMods
 
         public static void SceneLoaded()
         {
-            Interlocked.Exchange(ref pendingKind, -1);
+            Interlocked.Exchange(ref pending, 0);
             missingFileLogged = 0;
-            keyboardLogs = 0;
-            nextKeywordRead = DateTime.MinValue;
-            keyboard = null;
-            keyboardOpen = false;
+            keywordLogs = 0;
+            QuestKeyboard.SceneLoaded();
             UpdateLabels();
         }
 
-        // Runs on the game's own wheel spawn; the actual work is queued so it
-        // happens on the normal update tick instead of inside a Harmony patch.
+        // Runs on the game's own wheel spawn; the real work happens on the
+        // normal update tick instead of inside a Harmony patch.
         public static bool BeforeWheelRun(object __instance)
         {
             bool ours = false;
             try
             {
-                if (__instance == null) return true;
-                int id;
-                try { id = Id(__instance); } catch { return true; }
-                int kind;
-                if (!kinds.TryGetValue(id, out kind)) return true;
+                if (__instance == null || !ids.Contains(Id(__instance))) return true;
                 string name = SafeRead(__instance, "DisplayName") as string;
-                if (name == null) return true;
-                if (!name.StartsWith(RunLabel, StringComparison.Ordinal) &&
-                    !name.StartsWith(TypeLabel, StringComparison.Ordinal) &&
-                    !name.StartsWith(AmountLabel, StringComparison.Ordinal)) return true;
+                if (name == null || !name.StartsWith(LabelPrefix, StringComparison.Ordinal)) return true;
                 ours = true;
-                Interlocked.Exchange(ref pendingKind, kind);
-                MelonLogger.Msg("[GrabByName] " + KindName(kind) + " requested.");
+                Interlocked.Exchange(ref pending, 1);
+                MelonLogger.Msg("[GrabByName] Bubble pressed; opening the keyboard.");
             }
             catch (Exception ex) { MelonLogger.Warning("[GrabByName] Wheel request failed: " + Detail(ex)); }
             return !ours;
@@ -2622,140 +2586,44 @@ namespace QuestMods
 
         public static void Tick()
         {
-            if (keyboardOpen) { PollKeyboard(); return; }
-            int requested = Interlocked.Exchange(ref pendingKind, -1);
-            if (requested < 0) return;
-            if (requested == KindType) { OpenKeyboard(); return; }
-            if (requested == KindAmount) { CycleAmount(); return; }
-            string fresh = ReadKeyword();
-            if (fresh != null && fresh != keyword) { keyword = fresh; UpdateLabels(); }
-            if (string.IsNullOrEmpty(keyword))
+            int requests = Interlocked.Exchange(ref pending, 0);
+            if (requests <= 0) return;
+            if (QuestKeyboard.Open())
             {
-                MelonLogger.Warning("[GrabByName] No keyword yet; opening the keyboard.");
-                OpenKeyboard();
+                UpdateLabels();
                 return;
             }
-            try { GrabMatching(keyword, amount); }
-            catch (Exception ex) { MelonLogger.Warning("[GrabByName] Grab failed: " + Detail(ex)); }
+            // No keyboard (unsupported build or a build failure): fall back to
+            // the keyword stored on disk so the bubble still does something.
+            string fresh = ReadKeyword();
+            if (fresh != null) keyword = fresh;
+            UpdateLabels();
+            if (string.IsNullOrEmpty(keyword))
+            {
+                if (keywordLogs++ < 3)
+                    MelonLogger.Warning("[GrabByName] The keyboard is unavailable and no keyword is stored in " +
+                        (KeywordPath() ?? "the keyword file") + ".");
+                return;
+            }
+            GrabMatching(keyword, amount <= 0 ? int.MaxValue : amount);
         }
 
-        private static string KindName(int kind) =>
-            kind == KindType ? "Type Keyword" : kind == KindAmount ? "Grab Amount" : "Grab by Name";
-
-        private static void CycleAmount()
+        internal static void AcceptFromKeyboard(string text, int limit)
         {
-            int index = Array.IndexOf(AmountSteps, amount);
-            index = index < 0 ? 0 : (index + 1) % AmountSteps.Length;
-            amount = AmountSteps[index];
+            string clean = (text ?? "").Trim();
+            keyword = clean.Length > 32 ? clean.Substring(0, 32) : clean;
+            amount = limit <= 0 ? 0 : (limit > 500 ? 500 : limit);
+            WriteKeyword(keyword);
             WriteAmount(amount);
             UpdateLabels();
-            MelonLogger.Msg("[GrabByName] Grab amount is now " + amount + " pickup(s) per press.");
-        }
-
-        // ---- keyboard -------------------------------------------------------
-
-        private static void OpenKeyboard()
-        {
-            try
+            if (keyword.Length == 0)
             {
-                Type type = FindType("UnityEngine.TouchScreenKeyboard");
-                if (type == null)
-                {
-                    if (keyboardLogs++ < 2)
-                        MelonLogger.Warning("[GrabByName] TouchScreenKeyboard is not available; edit " +
-                            (KeywordPath() ?? "the keyword file") + " instead.");
-                    return;
-                }
-                MethodInfo open = type.GetMethods(S)
-                    .Where(m => m.Name == "Open" && m.ReturnType == type)
-                    .OrderByDescending(m => m.GetParameters().Length)
-                    .FirstOrDefault();
-                if (open == null)
-                {
-                    if (keyboardLogs++ < 2) MelonLogger.Warning("[GrabByName] TouchScreenKeyboard.Open was not found.");
-                    return;
-                }
-                keyboard = open.Invoke(null, KeyboardArgs(open));
-                keyboardOpen = keyboard != null;
-                if (!keyboardOpen)
-                {
-                    if (keyboardLogs++ < 2) MelonLogger.Warning("[GrabByName] The keyboard did not open; using the keyword file.");
-                    return;
-                }
-                MelonLogger.Msg("[GrabByName] Keyboard opened (current text '" + keyword + "'). Type, then press Done.");
+                MelonLogger.Warning("[GrabByName] Nothing was typed; nothing grabbed.");
+                return;
             }
-            catch (Exception ex)
-            {
-                keyboard = null;
-                keyboardOpen = false;
-                if (keyboardLogs++ < 3) MelonLogger.Warning("[GrabByName] Keyboard failed: " + Detail(ex));
-            }
-        }
-
-        private static object[] KeyboardArgs(MethodInfo open)
-        {
-            ParameterInfo[] p = open.GetParameters();
-            var args = new object[p.Length];
-            for (int i = 0; i < p.Length; i++)
-            {
-                Type t = p[i].ParameterType;
-                if (t == typeof(string)) args[i] = i == 0 ? keyword : "";
-                else if (t.IsEnum) args[i] = Enum.ToObject(t, 0);
-                else if (t == typeof(bool)) args[i] = false;
-                else if (t == typeof(int)) args[i] = 0;
-                else args[i] = t.IsValueType ? Activator.CreateInstance(t) : null;
-            }
-            return args;
-        }
-
-        private static void PollKeyboard()
-        {
-            try
-            {
-                if (keyboard == null) { keyboardOpen = false; return; }
-                string status = (SafeRead(keyboard, "status") ?? "Visible").ToString();
-                string text = SafeRead(keyboard, "text") as string;
-                if (status == "Visible")
-                {
-                    if (!string.IsNullOrEmpty(text) && text != keyword)
-                    {
-                        keyword = Clean(text);
-                        UpdateLabels();
-                    }
-                    return;
-                }
-                keyboardOpen = false;
-                keyboard = null;
-                if (status == "Done" && !string.IsNullOrEmpty(text))
-                {
-                    SetKeyword(text);
-                    MelonLogger.Msg("[GrabByName] Keyboard accepted '" + keyword + "'; grabbing up to " + amount + ".");
-                    GrabMatching(keyword, amount);
-                }
-                else MelonLogger.Msg("[GrabByName] Keyboard closed without a value (" + status + ").");
-            }
-            catch (Exception ex)
-            {
-                keyboardOpen = false;
-                keyboard = null;
-                MelonLogger.Warning("[GrabByName] Keyboard read failed: " + Detail(ex));
-            }
-        }
-
-        private static void SetKeyword(string text)
-        {
-            string clean = Clean(text);
-            if (clean.Length == 0) return;
-            keyword = clean;
-            WriteKeyword(clean);
-            UpdateLabels();
-        }
-
-        private static string Clean(string text)
-        {
-            if (text == null) return "";
-            string clean = text.Trim();
-            return clean.Length > 32 ? clean.Substring(0, 32) : clean;
+            MelonLogger.Msg("[GrabByName] Keyboard accepted '" + keyword + "' with amount " +
+                (amount <= 0 ? "all" : amount.ToString()) + ".");
+            GrabMatching(keyword, amount <= 0 ? int.MaxValue : amount);
         }
 
         // ---- grabbing -------------------------------------------------------
@@ -2795,7 +2663,7 @@ namespace QuestMods
                 }
             }
             MelonLogger.Msg("[GrabByName] Scanning " + candidates.Count + " pickup object(s) for '" + needle +
-                "' (limit " + limit + ").");
+                "' (limit " + (limit == int.MaxValue ? "all" : limit.ToString()) + ").");
             int matched = 0, grabbed = 0;
             foreach (object candidate in candidates)
             {
@@ -2820,8 +2688,6 @@ namespace QuestMods
                     if (start == null) continue;
                     start.Invoke(interactor, BuildArgs(start, pickup));
                     if (IsHeldNow(interactor, pickup)) { MelonLogger.Msg("[GrabByName] Grabbed '" + name + "'."); return true; }
-                    // Shelf items may stay docked after a plain grab; only then
-                    // is the pickup undocked and the grab retried once.
                     if (IsDockedNow(pickup) && TryUndock(pickup))
                     {
                         start.Invoke(interactor, BuildArgs(start, pickup));
@@ -2993,8 +2859,7 @@ namespace QuestMods
                 if (path == null || !System.IO.File.Exists(path))
                 {
                     if (missingFileLogged++ == 0)
-                        MelonLogger.Msg("[GrabByName] No keyword file yet (" + (path ?? "unresolved") +
-                            "); use the 'Type Keyword' wheel item or create it with one item-name fragment.");
+                        MelonLogger.Msg("[GrabByName] No stored keyword yet (" + (path ?? "unresolved") + ").");
                     return null;
                 }
                 foreach (string raw in System.IO.File.ReadAllLines(path))
@@ -3027,8 +2892,7 @@ namespace QuestMods
                 foreach (string raw in System.IO.File.ReadAllLines(path))
                 {
                     int value;
-                    if (int.TryParse(raw.Trim(), out value) && value > 0)
-                        return value > 100 ? 100 : value;
+                    if (int.TryParse(raw.Trim(), out value) && value >= 0) return value > 500 ? 500 : value;
                 }
             }
             catch { }
@@ -3049,19 +2913,10 @@ namespace QuestMods
 
         private static void UpdateLabels()
         {
+            string label = LabelPrefix + " (keyboard)";
             PropertyInfo property = typeof(QuickAccessMenuAction).GetProperty("displayName", I);
             foreach (object action in actions)
             {
-                string label;
-                try
-                {
-                    int kind;
-                    if (!kinds.TryGetValue(Id(action), out kind)) continue;
-                    label = kind == KindType ? TypeLabel + ": " + (keyword.Length == 0 ? "(empty)" : keyword)
-                          : kind == KindAmount ? AmountLabel + ": " + amount
-                          : RunLabel + " x" + amount + " '" + keyword + "'";
-                }
-                catch { continue; }
                 try { if (property?.GetSetMethod(true) != null) property.SetValue(action, label); }
                 catch (Exception ex) { MelonLogger.Warning("[GrabByName] Could not refresh label: " + Detail(ex)); }
             }
@@ -3122,6 +2977,918 @@ namespace QuestMods
         }
     }
 
+    // In-headset keyboard for "Grab by Name". Built from Unity primitives at
+    // runtime, so nothing new is referenced at compile time: a backplate, one
+    // cube per key, a TextMesh label per key and a header bar that shows the
+    // text being typed next to the amount field. The local hand's forward ray
+    // highlights the key it points at; the trigger - or, when no trigger value
+    // can be read, a short dwell - presses it. OK runs the grab, ESC closes,
+    // AMT switches typing between the item name and the amount. A blank amount
+    // means every match.
+    internal static class QuestKeyboard
+    {
+        private const BindingFlags I = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+        private const BindingFlags S = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+        private const string KeyPrefix = "QMK|";
+        private const string BackName = "QMKBACK";
+        private const string LabelName = "QMKL";
+        private const float KeySpacing = 0.0295f;
+        private const float DwellSeconds = 1.0f;
+        private static readonly float[] BaseKey = { 0.16f, 0.17f, 0.22f };
+        private static readonly float[] SpecialKey = { 0.30f, 0.22f, 0.08f };
+        private static readonly float[] HoverColor = { 0.15f, 1.00f, 0.35f };
+        private static readonly float[] AmountColor = { 0.05f, 0.65f, 0.75f };
+
+        private static readonly Dictionary<int, string> keyCodes = new Dictionary<int, string>();
+        private static readonly Dictionary<int, object> keyMaterials = new Dictionary<int, object>();
+        private static readonly Dictionary<int, float[]> keyColors = new Dictionary<int, float[]>();
+
+        private static object root, rootTransform, headerLabel, amtKey, amountFieldLabel;
+        private static int amountFieldId;
+        private static bool open, built, failed, amountMode, triggerWasDown, dwellWarned, readLog;
+        private static int hoveredId, pressCount, tickLogs;
+        private static float hoverAt;
+        private static string triggerMember, textBuffer = "", amountBuffer = "";
+        private static object playerInput;
+        private static global::HarmonyLib.Harmony keyboardHarmony;
+        private static bool inputHookTried;
+
+        public static bool IsOpen => open;
+
+        public static void SceneLoaded()
+        {
+            Close();
+        }
+
+        public static bool Open()
+        {
+            try
+            {
+                EnsureInputHook();
+                if (built && !RootAlive()) Reset();
+                if (!built && !failed) Build();
+                if (failed || root == null) return false;
+                Place();
+                SetActive(root, true);
+                open = true;
+                triggerWasDown = true;      // the press that opened the wheel must not type
+                hoveredId = 0;
+                textBuffer = "";
+                amountBuffer = "";
+                amountMode = false;
+                PaintAmountKey();
+                RefreshHeader();
+                MelonLogger.Msg("[Keyboard] Opened with " + keyCodes.Count + " keys; trigger=" +
+                    (triggerMember ?? "unknown (dwell fallback)") + "; buffers cleared.");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning("[Keyboard] Open failed: " + Detail(ex));
+                Close();
+                return false;
+            }
+        }
+
+        // A scene load destroys the panel; the proxy then stops answering, so
+        // the next open builds a fresh one instead of reusing a dead object.
+        private static bool RootAlive()
+        {
+            if (root == null) return false;
+            return !string.IsNullOrEmpty(Read(root, "name") as string);
+        }
+
+        private static void Reset()
+        {
+            open = false;
+            built = false;
+            failed = false;
+            root = null;
+            rootTransform = null;
+            headerLabel = null;
+            amtKey = null;
+            amountFieldLabel = null;
+            amountFieldId = 0;
+            hoveredId = 0;
+            keyCodes.Clear();
+            keyMaterials.Clear();
+            keyColors.Clear();
+        }
+
+        public static void Close()
+        {
+            try
+            {
+                if (root != null) SetActive(root, false);
+            }
+            catch { }
+            open = false;
+            hoveredId = 0;
+            triggerWasDown = false;
+        }
+
+        public static void Tick()
+        {
+            if (!open) return;
+            try
+            {
+                if (rootTransform == null) { Close(); return; }
+                object hand = HandTransform();
+                int hit = HitTest(hand);
+                if (hit != hoveredId)
+                {
+                    Paint(hoveredId, keyColors.TryGetValue(hoveredId, out float[] previous) ? previous : null);
+                    hoveredId = hit;
+                    hoverAt = Now();
+                    if (hit != 0) Paint(hit, HoverColor);
+                }
+                bool down = TriggerDown();
+                if (down && !triggerWasDown) PressHovered("trigger");
+                triggerWasDown = down;
+                if (triggerMember == null && hoveredId != 0 && Now() - hoverAt > DwellSeconds)
+                {
+                    if (!dwellWarned)
+                    {
+                        dwellWarned = true;
+                        MelonLogger.Warning("[Keyboard] No trigger value could be read; keys fire after a " +
+                            DwellSeconds.ToString("0.0") + " s hover instead. Tell the author if the trigger works.");
+                    }
+                    hoverAt = Now();
+                    PressHovered("dwell");
+                }
+            }
+            catch (Exception ex)
+            {
+                if (tickLogs++ < 3) MelonLogger.Warning("[Keyboard] Tick failed: " + Detail(ex));
+            }
+        }
+
+        private static void PressHovered(string source)
+        {
+            if (hoveredId == 0) return;
+            string code;
+            if (!keyCodes.TryGetValue(hoveredId, out code)) return;
+            pressCount++;
+            MelonLogger.Msg("[Keyboard] Key '" + code + "' pressed (#" + pressCount + ", " + source + ").");
+            hoverAt = Now();
+            Press(code);
+        }
+
+        private static void Press(string code)
+        {
+            if (string.IsNullOrEmpty(code)) return;
+            if (code.Length == 1)
+            {
+                if (amountMode && code[0] >= '0' && code[0] <= '9') { if (amountBuffer.Length < 4) amountBuffer += code; }
+                else if (textBuffer.Length < 32) textBuffer += code;
+            }
+            else if (code == "SPC") { if (!amountMode && textBuffer.Length < 32) textBuffer += " "; }
+            else if (code == "DEL")
+            {
+                if (amountMode) { if (amountBuffer.Length > 0) amountBuffer = amountBuffer.Substring(0, amountBuffer.Length - 1); }
+                else if (textBuffer.Length > 0) textBuffer = textBuffer.Substring(0, textBuffer.Length - 1);
+            }
+            else if (code == "CLR") { if (amountMode) amountBuffer = ""; else textBuffer = ""; }
+            else if (code == "AMT" || code == "AMTFIELD") { amountMode = !amountMode; PaintAmountKey(); }
+            else if (code == "ESC") { MelonLogger.Msg("[Keyboard] Closed without grabbing."); Close(); return; }
+            else if (code == "OK") { Submit(); return; }
+            RefreshHeader();
+        }
+
+        private static void Submit()
+        {
+            int limit = 0;
+            if (amountBuffer.Length > 0) int.TryParse(amountBuffer, out limit);
+            string text = textBuffer.Trim();
+            Close();
+            GrabByName.AcceptFromKeyboard(text, limit);
+        }
+
+        private static void RefreshHeader()
+        {
+            try
+            {
+                if (headerLabel != null)
+                {
+                    string typed = textBuffer.Length == 0 ? "_" : textBuffer + (amountMode ? "" : "_");
+                    SetMember(headerLabel, "text", (amountMode ? "NAME: " : "TYPING: ") + typed);
+                }
+                if (amountFieldLabel != null)
+                {
+                    string amount = amountBuffer.Length == 0 ? "all" : amountBuffer;
+                    SetMember(amountFieldLabel, "text",
+                        "Amount: " + amount + (amountMode ? "   <typing here>" : "   (press to type)"));
+                }
+            }
+            catch { }
+        }
+
+        private static void PaintAmountKey()
+        {
+            float[] color = amountMode ? AmountColor : SpecialKey;
+            Paint(amountFieldId, color);
+            try
+            {
+                if (amtKey == null) return;
+                Paint(Id(amtKey), color);
+            }
+            catch { }
+        }
+
+        private static void Paint(int id, float[] color)
+        {
+            object material;
+            if (id == 0 || color == null || !keyMaterials.TryGetValue(id, out material)) return;
+            try { SetColor(material, color[0], color[1], color[2]); } catch { }
+        }
+
+        // A passive prefix on the game's own Interactor.CheckHold(PlayerInput):
+        // it only remembers the PlayerInput instance so the keyboard can read
+        // the trigger. It never changes the game's behaviour.
+        private static void EnsureInputHook()
+        {
+            if (inputHookTried || playerInput != null) return;
+            inputHookTried = true;
+            try
+            {
+                Type interactor = FindType("Il2Cpp.Interactor");
+                if (interactor == null) { MelonLogger.Warning("[Keyboard] Il2Cpp.Interactor not found; no trigger hook."); return; }
+                MethodInfo hold = interactor.GetMethods(I | BindingFlags.DeclaredOnly).FirstOrDefault(m =>
+                {
+                    ParameterInfo[] p = m.GetParameters();
+                    return m.Name == "CheckHold" && !m.IsStatic && !m.IsAbstract && m.ReturnType == typeof(void) &&
+                           p.Length == 1 && p[0].ParameterType.FullName == "Il2Cpp.PlayerInput";
+                });
+                if (hold == null) { MelonLogger.Warning("[Keyboard] Interactor.CheckHold(PlayerInput) not found; no trigger hook."); return; }
+                if (keyboardHarmony == null) keyboardHarmony = new global::HarmonyLib.Harmony("QuestMods.Keyboard");
+                keyboardHarmony.Patch(hold, prefix: new HarmonyMethod(typeof(QuestKeyboard).GetMethod(nameof(CaptureInput), S)));
+                MelonLogger.Msg("[Keyboard] Input capture hook installed: " + hold + ".");
+            }
+            catch (Exception ex) { MelonLogger.Warning("[Keyboard] Input capture hook failed: " + Detail(ex)); }
+        }
+
+        public static bool CaptureInput(object __0)
+        {
+            if (__0 != null) playerInput = __0;
+            return true;
+        }
+
+        // ---- trigger --------------------------------------------------------
+
+        private static bool TriggerDown()
+        {
+            float value;
+            if (TryTrigger(out value))
+            {
+                if (!readLog)
+                {
+                    readLog = true;
+                    MelonLogger.Msg("[Keyboard] Trigger source: " + (triggerMember ?? "unresolved") + ".");
+                }
+                return value > 0.5f;
+            }
+            return false;
+        }
+
+        private static bool TryTrigger(out float value)
+        {
+            value = 0f;
+            object input = playerInput ?? GrabbyHands.LastPlayerInput();
+            if (input == null) input = FindPlayerInput();
+            playerInput = input;
+            if (input != null && ReadTrigger(input, out value)) return true;
+            foreach (object interactor in GrabbyHands.LocalInteractorObjects())
+            {
+                if (interactor != null && ReadTrigger(interactor, out value)) return true;
+            }
+            return false;
+        }
+
+        private static readonly string[] TriggerNames =
+        {
+            "IsRightGrabPressed", "RightGrabPressed", "IsGrabPressed", "GrabPressed", "IsPressing", "IsTriggerDown",
+            "RightGrab", "Grab", "IsGrabbing", "RightGrabAxis", "GrabAxis", "RightTriggerAxis", "TriggerAxis", "RightTrigger"
+        };
+
+        private static bool ReadTrigger(object source, out float value)
+        {
+            value = 0f;
+            foreach (string name in TriggerNames)
+            {
+                object raw = Read(source, name);
+                if (raw == null) continue;
+                float numeric;
+                bool valid = false;
+                if (raw is bool flag) { numeric = flag ? 1f : 0f; valid = true; }
+                else if (raw is float single) { numeric = single; valid = true; }
+                else if (raw is double number) { numeric = (float)number; valid = true; }
+                else if (raw is int integer) { numeric = integer; valid = true; }
+                else continue;
+                if (!valid) continue;
+                if (triggerMember == null) triggerMember = name + " on " + source.GetType().Name;
+                value = numeric;
+                return true;
+            }
+            return false;
+        }
+
+        private static object FindPlayerInput()
+        {
+            try
+            {
+                object direct = GrabbyHands.LastPlayerInput();
+                if (direct != null) return direct;
+                foreach (string ownerName in new[] { "Il2Cpp.Player", "Il2Cpp.PlayerController", "Il2Cpp.LocalPlayer" })
+                {
+                    Type owner = FindType(ownerName);
+                    if (owner == null) continue;
+                    object instance = Static(owner, "Current") ?? Static(owner, "Local") ?? Static(owner, "Instance") ?? Static(owner, "LocalPlayer");
+                    if (instance == null) continue;
+                    foreach (string member in new[] { "Input", "PlayerInput", "input", "playerInput", "Inputs" })
+                    {
+                        object input = Read(instance, member);
+                        if (input != null && input.GetType().Name.IndexOf("PlayerInput", StringComparison.Ordinal) >= 0)
+                        {
+                            MelonLogger.Msg("[Keyboard] PlayerInput found on " + ownerName + "." + member + ".");
+                            return input;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex) { MelonLogger.Warning("[Keyboard] PlayerInput lookup failed: " + Detail(ex)); }
+            return null;
+        }
+
+        // ---- geometry -------------------------------------------------------
+
+        private static object HandTransform()
+        {
+            List<object> interactors = GrabbyHands.LocalInteractorObjects();
+            foreach (object interactor in interactors)
+            {
+                object hand = Read(interactor, "triggerObjectTransform") ?? Read(interactor, "TriggerObjectTransform");
+                if (hand != null) return hand;
+            }
+            foreach (object interactor in interactors)
+            {
+                object hand = Read(interactor, "transform");
+                if (hand != null) return hand;
+            }
+            return null;
+        }
+
+        private static void Place()
+        {
+            object hand = HandTransform();
+            if (hand == null) return;
+            float hx, hy, hz;
+            if (!TryVector(hand, "position", out hx, out hy, out hz)) return;
+            float fx, fy, fz;
+            if (!TryVector(hand, "forward", out fx, out fy, out fz)) { fx = 0f; fy = 0f; fz = 1f; }
+            float px = hx + fx * 0.42f, py = hy + fy * 0.42f, pz = hz + fz * 0.42f;
+            Call(rootTransform, "set_position", Vec(px, py, pz));
+            float dx = hx - px, dy = hy - py, dz = hz - pz;
+            float length = (float)Math.Sqrt(dx * dx + dy * dy + dz * dz);
+            if (length < 0.0001f) return;
+            object rotation = CallStatic(FindType("UnityEngine.Quaternion"), "LookRotation",
+                Vec(dx / length, dy / length, dz / length), Vec(0f, 1f, 0f));
+            if (rotation != null) Call(rootTransform, "set_rotation", rotation);
+        }
+
+        private static int HitTest(object hand)
+        {
+            if (hand == null) return 0;
+            float ox, oy, oz;
+            if (!TryVector(hand, "position", out ox, out oy, out oz)) return 0;
+            float dx, dy, dz;
+            if (!TryVector(hand, "forward", out dx, out dy, out dz)) return 0;
+            Type physics = FindType("UnityEngine.Physics");
+            if (physics == null) return 0;
+            MethodInfo raycast = physics.GetMethods(S).FirstOrDefault(m =>
+            {
+                ParameterInfo[] p = m.GetParameters();
+                return m.Name == "RaycastAll" && p.Length >= 3 && p.Length <= 5 &&
+                       p[0].ParameterType.Name == "Vector3" && p[1].ParameterType.Name == "Vector3" &&
+                       p[2].ParameterType == typeof(float);
+            });
+            if (raycast == null) return 0;
+            ParameterInfo[] rp = raycast.GetParameters();
+            object[] rayArgs = new object[rp.Length];
+            rayArgs[0] = Vec(ox, oy, oz);
+            rayArgs[1] = Vec(dx, dy, dz);
+            for (int i = 2; i < rp.Length; i++)
+            {
+                if (rp[i].ParameterType == typeof(float)) rayArgs[i] = 4f;
+                else if (rp[i].ParameterType == typeof(int)) rayArgs[i] = -1;
+                else if (rp[i].ParameterType.IsEnum) rayArgs[i] = Enum.ToObject(rp[i].ParameterType, 0);
+                else rayArgs[i] = rp[i].ParameterType.IsValueType ? Activator.CreateInstance(rp[i].ParameterType) : null;
+            }
+            List<object> list;
+            try
+            {
+                object hits = raycast.Invoke(null, rayArgs);
+                list = DevWheelBridge.ReadArray(hits);
+            }
+            catch (Exception ex)
+            {
+                if (tickLogs++ < 3) MelonLogger.Warning("[Keyboard] Raycast failed: " + Detail(ex));
+                return 0;
+            }
+            int best = 0;
+            float bestDistance = float.MaxValue;
+            foreach (object hit in list)
+            {
+                if (hit == null) continue;
+                float distance = ToFloat(Read(hit, "distance"), float.MaxValue);
+                if (distance >= bestDistance) continue;
+                object collider = Read(hit, "collider");
+                if (collider == null) continue;
+                string name = Read(collider, "name") as string;
+                if (name == null) { object owner = Read(collider, "gameObject"); if (owner != null) name = Read(owner, "name") as string; }
+                if (name == null || !name.StartsWith(KeyPrefix, StringComparison.Ordinal)) continue;
+                int id;
+                try { id = Id(collider); } catch { continue; }
+                if (!keyCodes.ContainsKey(id)) continue;
+                best = id;
+                bestDistance = distance;
+            }
+            return best;
+        }
+
+        private static bool TryVector(object source, string member, out float x, out float y, out float z)
+        {
+            x = y = z = 0f;
+            object vector = Read(source, member);
+            if (vector == null) return false;
+            object vx = Read(vector, "x"), vy = Read(vector, "y"), vz = Read(vector, "z");
+            if (vx == null || vy == null || vz == null) return false;
+            try
+            {
+                x = Convert.ToSingle(vx);
+                y = Convert.ToSingle(vy);
+                z = Convert.ToSingle(vz);
+                return true;
+            }
+            catch { return false; }
+        }
+
+        // ---- construction ---------------------------------------------------
+
+        private static void Build()
+        {
+            built = true;
+            try
+            {
+                Type gameObjectType = FindType("UnityEngine.GameObject");
+                if (gameObjectType == null) { Fail("UnityEngine.GameObject missing"); return; }
+                root = Activator.CreateInstance(gameObjectType, new object[] { "QuestModsKeyboard" });
+                rootTransform = Read(root, "transform");
+                if (rootTransform == null) { Fail("keyboard has no transform"); return; }
+
+                object plate = CreatePrimitive(3, BackName);
+                if (plate == null) { Fail("could not create the backplate"); return; }
+                object plateTransform = Read(plate, "transform");
+                Call(plateTransform, "SetParent", rootTransform, false);
+                Call(plateTransform, "set_localPosition", Vec(0f, 0.038f, 0f));
+                Call(plateTransform, "set_localScale", Vec(0.368f, 0.272f, 0.004f));
+                object plateMaterial = CreateMaterial(0.05f, 0.06f, 0.09f);
+                if (plateMaterial != null) SetMember(RendererOf(plate), "material", plateMaterial);
+
+                BuildRow("1234567890", 0.070f);
+                BuildRow("QWERTYUIOP", 0.038f);
+                BuildRow("ASDFGHJKL", 0.006f);
+                BuildRow("ZXCVBNM", -0.026f);
+                BuildSpecials(-0.058f);
+                BuildField(0.108f);
+
+                headerLabel = CreateLabel(rootTransform, "Text: _", 0f, 0.142f, 0.0035f, 0.006f, 1f, 1f, 1f);
+                MelonLogger.Msg("[Keyboard] Built " + keyCodes.Count + " keys; font=" +
+                    (FundamentalFont() != null ? "ready" : "missing") + "; root=" + Read(root, "name") + ".");
+                RefreshHeader();
+                SetActive(root, false);
+            }
+            catch (Exception ex)
+            {
+                Fail(Detail(ex));
+            }
+        }
+
+        private static void BuildRow(string keys, float y)
+        {
+            float startX = -(keys.Length - 1) * KeySpacing * 0.5f;
+            for (int i = 0; i < keys.Length; i++) BuildKey(keys[i].ToString(), startX + i * KeySpacing, y, BaseKey);
+        }
+
+        private static void BuildSpecials(float y)
+        {
+            string[] codes = { "SPC", "DEL", "CLR", "AMT", "OK", "ESC" };
+            float startX = -(codes.Length - 1) * KeySpacing * 0.5f;
+            for (int i = 0; i < codes.Length; i++)
+            {
+                object key = BuildKey(codes[i], startX + i * KeySpacing, y, SpecialKey);
+                if (codes[i] == "AMT") amtKey = key;
+            }
+        }
+
+        private static object BuildKey(string code, float x, float y, float[] color)
+        {
+            object key = CreatePrimitive(3, KeyPrefix + code);
+            if (key == null) return null;
+            object transform = Read(key, "transform");
+            Call(transform, "SetParent", rootTransform, false);
+            Call(transform, "set_localPosition", Vec(x, y, 0f));
+            Call(transform, "set_localScale", Vec(0.027f, 0.031f, 0.005f));
+            object material = CreateMaterial(color[0], color[1], color[2]);
+            SetMember(RendererOf(key), "material", material);
+            object idSource = Read(key, "collider") ?? key;
+            int id;
+            try { id = Id(idSource); } catch { return key; }
+            keyCodes[id] = code;
+            keyColors[id] = color;
+            if (material != null) keyMaterials[id] = material;
+            CreateLabel(rootTransform, code, x, y, 0.0035f, 0.007f, 1f, 1f, 1f);
+            return idSource;
+        }
+
+        private static object EnumValue(string typeName, int value)
+        {
+            Type type = FindType(typeName);
+            return type == null ? null : Enum.ToObject(type, value);
+        }
+
+        private static object ColorValue(float r, float g, float b)
+        {
+            Type type = FindType("UnityEngine.Color");
+            if (type == null) return null;
+            try { return Activator.CreateInstance(type, r, g, b, 1f); } catch { return null; }
+        }
+
+        private static void BuildField(float y)
+        {
+            object field = CreatePrimitive(3, KeyPrefix + "AMTFIELD");
+            if (field == null) return;
+            object transform = Read(field, "transform");
+            Call(transform, "SetParent", rootTransform, false);
+            Call(transform, "set_localPosition", Vec(0f, y, 0f));
+            Call(transform, "set_localScale", Vec(0.330f, 0.024f, 0.005f));
+            object material = CreateMaterial(SpecialKey[0], SpecialKey[1], SpecialKey[2]);
+            if (material != null) SetMember(RendererOf(field), "material", material);
+            object idSource = Read(field, "collider") ?? field;
+            try
+            {
+                int id = Id(idSource);
+                keyCodes[id] = "AMTFIELD";
+                keyColors[id] = SpecialKey;
+                amountFieldId = id;
+                if (material != null) keyMaterials[id] = material;
+            }
+            catch { }
+            amountFieldLabel = CreateLabel(rootTransform, "Amount: all   (press to type)", 0f, y, 0.0035f, 0.0055f, 1f, 1f, 1f);
+        }
+
+        private static object RendererOf(object target)
+        {
+            object direct = Read(target, "renderer");
+            if (direct != null) return direct;
+            try
+            {
+                Type rendererType = FindType("UnityEngine.Renderer") ?? FindType("UnityEngine.MeshRenderer");
+                if (rendererType == null) return null;
+                MethodInfo get = target.GetType().GetMethods(I).FirstOrDefault(m =>
+                    m.Name == "GetComponent" && m.GetParameters().Length == 1 &&
+                    m.GetParameters()[0].ParameterType == typeof(Type));
+                return get?.Invoke(target, new[] { (object)rendererType });
+            }
+            catch { return null; }
+        }
+
+        private static object CreatePrimitive(int primitive, string name)
+        {
+            try
+            {
+                Type gameObjectType = FindType("UnityEngine.GameObject");
+                Type primitiveType = FindType("UnityEngine.PrimitiveType");
+                if (gameObjectType == null || primitiveType == null) return null;
+                MethodInfo create = gameObjectType.GetMethod("CreatePrimitive", S, null, new[] { primitiveType }, null);
+                if (create == null) return null;
+                object created = create.Invoke(null, new[] { Enum.ToObject(primitiveType, primitive) });
+                SetMember(created, "name", name);
+                return created;
+            }
+            catch (Exception ex) { MelonLogger.Warning("[Keyboard] CreatePrimitive failed: " + Detail(ex)); return null; }
+        }
+
+        private static object CreateLabel(object parent, string text, float x, float y, float z,
+                                         float characterSize, float r, float g, float b)
+        {
+            try
+            {
+                Type gameObjectType = FindType("UnityEngine.GameObject");
+                Type textMeshType = FindType("UnityEngine.TextMesh");
+                if (gameObjectType == null || textMeshType == null) return null;
+                object label = Activator.CreateInstance(gameObjectType, new object[] { LabelName });
+                object transform = Read(label, "transform");
+                Call(transform, "SetParent", parent, false);
+                Call(transform, "set_localPosition", Vec(x, y, z));
+                Call(transform, "set_localRotation", StaticRead(FindType("UnityEngine.Quaternion"), "identity"));
+                MethodInfo add = gameObjectType.GetMethods(I).FirstOrDefault(m =>
+                    m.Name == "AddComponent" && m.GetParameters().Length == 1 && m.GetParameters()[0].ParameterType == typeof(Type));
+                object tm = add?.Invoke(label, new[] { (object)textMeshType });
+                if (tm == null) return null;
+                SetMember(tm, "text", text);
+                SetMember(tm, "fontSize", 64);
+                SetMember(tm, "characterSize", characterSize);
+                SetMember(tm, "anchor", EnumValue("UnityEngine.TextAnchor", 4));
+                SetMember(tm, "alignment", EnumValue("UnityEngine.TextAlignment", 1));
+                SetMember(tm, "color", ColorValue(r, g, b));
+                object font = FundamentalFont();
+                if (font != null)
+                {
+                    SetMember(tm, "font", font);
+                    object renderer = RendererOf(label);
+                    object material = Read(font, "material");
+                    if (renderer != null && material != null) SetMember(renderer, "material", material);
+                }
+                return tm;
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning("[Keyboard] Label '" + text + "' failed: " + Detail(ex));
+                return null;
+            }
+        }
+
+        private static object fontLoaded;
+        private static bool fontTried;
+
+        private static object FundamentalFont()
+        {
+            if (fontTried) return fontLoaded;
+            fontTried = true;
+            try
+            {
+                Type resources = FindType("UnityEngine.Resources");
+                Type fontType = FindType("UnityEngine.Font");
+                if (fontType == null) return null;
+                MethodInfo generic = resources?.GetMethods(S).FirstOrDefault(m =>
+                    m.Name == "GetBuiltinResource" && m.IsGenericMethodDefinition && m.GetGenericArguments().Length == 1 &&
+                    m.GetParameters().Length == 1 && m.GetParameters()[0].ParameterType == typeof(string));
+                if (generic != null)
+                {
+                    foreach (string name in new[] { "Arial.ttf", "LegacyRuntime.ttf" })
+                    {
+                        try
+                        {
+                            object candidate = generic.MakeGenericMethod(fontType).Invoke(null, new object[] { name });
+                            if (candidate != null) { fontLoaded = candidate; MelonLogger.Msg("[Keyboard] Font: builtin " + name + "."); return fontLoaded; }
+                        }
+                        catch { }
+                    }
+                }
+                MethodInfo dynamic = fontType.GetMethod("CreateDynamicFontFromOSFont", S, null, new[] { typeof(string), typeof(int) }, null);
+                if (dynamic != null)
+                {
+                    foreach (string name in new[] { "Roboto", "Droid Sans", "Arial" })
+                    {
+                        try
+                        {
+                            object candidate = dynamic.Invoke(null, new object[] { name, 48 });
+                            if (candidate != null) { fontLoaded = candidate; MelonLogger.Msg("[Keyboard] Font: OS " + name + "."); return fontLoaded; }
+                        }
+                        catch { }
+                    }
+                }
+                MelonLogger.Warning("[Keyboard] No font found; keys will be blank coloured cubes.");
+            }
+            catch (Exception ex) { MelonLogger.Warning("[Keyboard] Font lookup failed: " + Detail(ex)); }
+            return fontLoaded;
+        }
+
+        private static object CreateMaterial(float r, float g, float b)
+        {
+            try
+            {
+                Type shaderType = FindType("UnityEngine.Shader");
+                Type materialType = FindType("UnityEngine.Material");
+                if (shaderType == null || materialType == null) return null;
+                MethodInfo find = shaderType.GetMethod("Find", S, null, new[] { typeof(string) }, null);
+                object shader = null;
+                foreach (string name in new[] { "Unlit/Color", "Sprites/Default", "Legacy Shaders/Diffuse", "Standard" })
+                {
+                    shader = find?.Invoke(null, new object[] { name });
+                    if (shader != null) break;
+                }
+                if (shader == null) return null;
+                object material = Activator.CreateInstance(materialType, shader);
+                SetColor(material, r, g, b);
+                return material;
+            }
+            catch (Exception ex) { MelonLogger.Warning("[Keyboard] Material failed: " + Detail(ex)); return null; }
+        }
+
+        private static void SetColor(object material, float r, float g, float b)
+        {
+            if (material == null) return;
+            try
+            {
+                object color = ColorValue(r, g, b);
+                if (color == null) return;
+                object property = material.GetType().GetProperty("color", I);
+                if (property != null && property.GetSetMethod(true) != null)
+                {
+                    try { property.SetValue(material, color); return; } catch { }
+                }
+                MethodInfo setter = material.GetType().GetMethods(I).FirstOrDefault(m =>
+                    m.Name == "SetColor" && m.GetParameters().Length == 2 &&
+                    m.GetParameters()[0].ParameterType == typeof(string));
+                if (setter != null)
+                {
+                    foreach (string name in new[] { "_Color", "_BaseColor" })
+                    {
+                        try { setter.Invoke(material, new[] { (object)name, color }); return; } catch { }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private static void Fail(string reason)
+        {
+            failed = true;
+            MelonLogger.Warning("[Keyboard] Could not build the in-world keyboard (" + reason +
+                "); Grab by Name will use the stored keyword file instead.");
+        }
+
+        // ---- reflection helpers --------------------------------------------
+
+        private static object Read(object target, string member)
+        {
+            if (target == null) return null;
+            try
+            {
+                Type type = target.GetType();
+                PropertyInfo property = type.GetProperty(member, I);
+                if (property != null && property.GetIndexParameters().Length == 0 && property.GetGetMethod(true) != null)
+                    return property.GetValue(target);
+                for (Type current = type; current != null; current = current.BaseType)
+                {
+                    FieldInfo field = current.GetField(member, I | BindingFlags.DeclaredOnly);
+                    if (field != null) return field.GetValue(target);
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static object StaticRead(Type type, string member)
+        {
+            if (type == null) return null;
+            try
+            {
+                PropertyInfo property = type.GetProperty(member, S | I);
+                if (property != null) return property.GetValue(null);
+            }
+            catch { }
+            return null;
+        }
+
+        private static object Static(Type type, string member)
+        {
+            if (type == null) return null;
+            try
+            {
+                PropertyInfo property = type.GetProperty(member, S | I);
+                if (property != null && property.GetGetMethod(true) != null)
+                {
+                    object value = property.GetValue(null);
+                    if (value != null) return value;
+                }
+                FieldInfo field = type.GetField(member, S | I);
+                if (field != null) return field.GetValue(null);
+            }
+            catch { }
+            return null;
+        }
+
+        private static object Call(object target, string name, params object[] args)
+        {
+            if (target == null) return null;
+            Type type = target.GetType();
+            foreach (MethodInfo method in type.GetMethods(I))
+            {
+                if (method.Name != name || method.IsStatic) continue;
+                ParameterInfo[] p = method.GetParameters();
+                if (p.Length != args.Length) continue;
+                bool fits = true;
+                for (int i = 0; i < p.Length; i++)
+                {
+                    if (args[i] == null) { fits = p[i].ParameterType.IsClass || !p[i].ParameterType.IsValueType; continue; }
+                    if (!p[i].ParameterType.IsInstanceOfType(args[i])) { fits = false; break; }
+                }
+                if (!fits) continue;
+                try { return method.Invoke(target, args); }
+                catch (Exception ex) { MelonLogger.Warning("[Keyboard] " + name + " failed: " + Detail(ex)); return null; }
+            }
+            return null;
+        }
+
+        private static object CallStatic(Type type, string name, params object[] args)
+        {
+            if (type == null) return null;
+            foreach (MethodInfo method in type.GetMethods(S))
+            {
+                if (method.Name != name || method.IsGenericMethodDefinition) continue;
+                ParameterInfo[] p = method.GetParameters();
+                if (p.Length != args.Length) continue;
+                bool fits = true;
+                for (int i = 0; i < p.Length; i++)
+                {
+                    if (args[i] == null) continue;
+                    if (!p[i].ParameterType.IsInstanceOfType(args[i])) { fits = false; break; }
+                }
+                if (!fits) continue;
+                try { return method.Invoke(null, args); } catch { return null; }
+            }
+            return null;
+        }
+
+        private static void SetMember(object target, string member, object value)
+        {
+            if (target == null || value == null) return;
+            Type type = target.GetType();
+            PropertyInfo property = type.GetProperty(member, I);
+            if (property != null && property.GetIndexParameters().Length == 0 && property.GetSetMethod(true) != null)
+            {
+                property.SetValue(target, value);
+                return;
+            }
+            for (Type current = type; current != null; current = current.BaseType)
+            {
+                FieldInfo field = current.GetField(member, I | BindingFlags.DeclaredOnly);
+                if (field != null) { field.SetValue(target, value); return; }
+            }
+        }
+
+        private static void SetActive(object gameObject, bool active)
+        {
+            object result = Call(gameObject, "SetActive", active);
+            if (result == null) Call(gameObject, "set_active", active);
+        }
+
+        private static object Vec(float x, float y, float z)
+        {
+            Type vector = FindType("UnityEngine.Vector3");
+            if (vector == null) return null;
+            try { return Activator.CreateInstance(vector, x, y, z); } catch { return null; }
+        }
+
+        private static float ToFloat(object value, float fallback)
+        {
+            if (value == null) return fallback;
+            try { return Convert.ToSingle(value); } catch { return fallback; }
+        }
+
+        private static float Now()
+        {
+            return (float)(DateTime.UtcNow - DateTime.UtcNow.Date).TotalSeconds;
+        }
+
+        private static int Id(object target)
+        {
+            if (target == null) throw new Exception("null Unity object");
+            MethodInfo method = target.GetType().GetMethod("GetInstanceID", I, null, Type.EmptyTypes, null);
+            if (method == null) throw new Exception("GetInstanceID unavailable on " + target.GetType().FullName);
+            return Convert.ToInt32(method.Invoke(target, null));
+        }
+
+        private static Type FindType(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return null;
+            foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                Type type = assembly.GetType(name, false);
+                if (type != null) return type;
+            }
+            string shortName = name.Substring(name.LastIndexOf('.') + 1);
+            foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                try
+                {
+                    Type type = assembly.GetTypes().FirstOrDefault(t => t.Name == shortName);
+                    if (type != null) return type;
+                }
+                catch { }
+            }
+            return null;
+        }
+
+        private static string Detail(Exception ex)
+        {
+            if (ex is TargetInvocationException && ex.InnerException != null) ex = ex.InnerException;
+            return ex.GetType().Name + ": " + ex.Message;
+        }
+    }
+
     // No custom board or Unity objects. The wheel item and the grab hook are
     // experimental; actual native call dispatch varies between Quest builds.
     internal static class GrabbyHands
@@ -3137,6 +3904,7 @@ namespace QuestMods
         private static readonly List<Type> pickupTypes = new List<Type>();
         private static int ownershipLogs;
         private static bool ready, enabled, grabScanDone, wheelHookAttempted;
+        private static object lastInput;
         private static int grabHooks, holdHooks, pending, startLogs, holdLogs;
         [ThreadStatic] private static bool insideFallback;
         private static global::HarmonyLib.Harmony grabHarmony;
@@ -3399,8 +4167,14 @@ namespace QuestMods
         // its own docked Pickup. Other nearby interactables are not guessed.
         // It asks the GAME to confirm/forward/interact: Pickup.Interact is
         // responsible for Undock(interactor, true, 1). Never pre-undock a slot.
-        public static bool BeforeCheckHold(object __instance)
+        internal static object LastPlayerInput()
         {
+            return lastInput;
+        }
+
+        public static bool BeforeCheckHold(object __instance, object __0)
+        {
+            if (__0 != null) lastInput = __0;
             if (!enabled || insideFallback || __instance == null) return true;
             bool confirmationEntered = false;
             try

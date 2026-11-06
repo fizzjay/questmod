@@ -9,9 +9,10 @@ This is a handoff for a developer or future AI assistant working on this project
 
 CURRENT STATUS — READ THIS FIRST
 --------------------------------
-Latest source: Class1.cs (QuestMods 1.13.0 in this repository)
+Latest source: Class1.cs (QuestMods 1.14.0 in this repository)
 Latest version actually tested by the user: QuestMods 1.11.0 ran on the Quest (log supplied). Colours were confirmed good ("colors are nice"), the local PlayerCharacter resolved but Super Speed still changed no speed ("No readable stat manager on the local character."), and Grabby Hands could still not grab from back hands or pockets.
-Status of 1.13.0: produced and statically checked (tree-sitter parse, balanced braces, no unused private fields) only. It has NOT been compiled by the assistant and has NOT been run on the Quest.
+Latest version tested by the user: 1.12.0. It gave NO keyboard at all ("right now there's also no keyboard"), which is what 1.14.0 fixes.
+Status of 1.14.0: produced and statically checked (tree-sitter parse, balanced braces, no unused private fields) only. It has NOT been compiled by the assistant and has NOT been run on the Quest. The in-world keyboard is the largest unverified piece: panel placement, TextMesh size, the trigger read and the raycast are all best-effort guesses and every failure path is logged with a [Keyboard] prefix.
 
 WHAT THE 1.10.1 LOG SHOWED (facts, from the user's log)
 -------------------------------------------------------
@@ -29,6 +30,19 @@ WHAT THE 1.11.0 LOG SHOWED (facts, from the user's log)
 - Grabby Hands now reaches the body slots: "target=Back Slot ... Interacting=True held=Bag(Clone)", "target=Pouch Slot Right", "target=Dock MR", "target=StockDock". The unmasked 2.5 m hand sweep is what finds them; the game's own capsule returns 0 colliders in a crowd.
 - Grab by Name was created and tinted but had no keyword: every press logged "No keyword set...", so the feature never ran a scan.
 - The old "Grabby Hands only reaches the forward capsule" failure is gone; the user's remaining complaint is "i still cant grab from other people".
+
+1.14.0 CHANGE — ONE BUBBLE, MOD-OWNED KEYBOARD
+----------------------------------------------
+What the user said (verbatim intent): one Grab-by-Name bubble, not three; pressing it must open a keyboard; the keyboard must be ours (a laser from the finger picks the key under it, trigger pulls it); there must be a bar showing what is being typed and an empty field whose press switches typing to the amount; no amount means "all". The platform TouchScreenKeyboard did NOT appear on the headset, so it must never be used again.
+What 1.14.0 does:
+- Back to ONE wheel bubble, "Grab by Name" (violet 0.85/0.05/1.00). The three-item group and its CreateGrabItem helper are deleted.
+- New class QuestKeyboard builds a board at runtime from Unity primitives (backplate cube, one cube per key, one TextMesh label per key, one TextMesh per bar) and places it 0.42 m in front of the local hand, facing the player. Nothing new is referenced at compile time; everything goes through reflection.
+- Layout: header bar "TYPING: <text>", a wide amount field "Amount: all (press to type)", rows 1234567890 / QWERTYUIOP / ASDFGHJKL / ZXCVBNM, then SPC DEL CLR AMT OK ESC.
+- Pointer: Physics.RaycastAll from the hand's triggerObjectTransform along its forward; the nearest collider whose name starts with "QMK|" is the key under the laser and is tinted green.
+- Press: the game's own PlayerInput instance is captured by a passive prefix on Interactor.CheckHold(PlayerInput) (GrabbyHands also remembers the argument it already receives). The trigger is read from the first member in a candidate list (IsRightGrabPressed, RightGrabPressed, IsGrabPressed, GrabPressed, IsPressing, IsTriggerDown, RightGrab, Grab, IsGrabbing, RightGrabAxis, GrabAxis, RightTriggerAxis, TriggerAxis, RightTrigger). The chosen member is logged once as "Trigger source: ...". If nothing can be read, a key fires after a 1.0 s hover and that is logged as a warning.
+- OK calls GrabByName.AcceptFromKeyboard(text, amount), which writes UserData/questmods_grabname.txt and questmods_grabamount.txt, then runs the existing grab scan. A blank amount is passed as int.MaxValue ("all"). ESC closes without grabbing.
+- The bubble still falls back to the stored keyword file if the board cannot be built, so the button is never dead.
+Unverified and most likely to need a follow-up: whether the panel faces/places correctly in this game's world space, whether the TextMesh font (builtin Arial.ttf on Unity 2020.3) and the characterSize value make the labels readable, whether a PlayerInput member in that list actually tracks the trigger, and whether the raycast reaches the keys through whatever the game puts on the hand layer.
 
 1.13.0 CHANGE
 --------------
