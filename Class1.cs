@@ -1,4 +1,4 @@
-﻿// QuestMods 1.14.0 - mod wheel ("Quest Mods") for the Quest port of A Township Tale.
+﻿// QuestMods 1.14.1 - mod wheel ("Quest Mods") for the Quest port of A Township Tale.
 // 1.10.0 added a "Super Speed" (5x local speed) toggle beside Grabby Hands and
 // per-action bubble colours (Fly red, Grabby Hands green, Super Speed blue).
 // 1.10.1 broadened every lookup. 1.11.0 fixed the speed stat route (it now
@@ -18,6 +18,9 @@
 //   - OK grabs, ESC closes, and a blank amount means "every match".
 // If the board cannot be built the bubble falls back to the stored keyword
 // file, so nothing regresses into a dead button.
+// 1.14.1 is a compile fix only: QuestKeyboard.SetColor kept the Material
+// "color" PropertyInfo in an object, which made GetSetMethod/SetValue fail to
+// resolve. Nothing else changed.
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -29,7 +32,7 @@ using Il2CppAlta.Api.DataTransferModels.Models.Shared;
 using Il2CppAlta.QuickAccessActions;
 using MelonLoader;
 
-[assembly: MelonInfo(typeof(QuestMods.Mod), "QuestMods", "1.14.0", "you")]
+[assembly: MelonInfo(typeof(QuestMods.Mod), "QuestMods", "1.14.1", "you")]
 [assembly: MelonGame(null, null)]
 
 namespace QuestMods
@@ -42,7 +45,7 @@ namespace QuestMods
 
         public override void OnInitializeMelon()
         {
-            LoggerInstance.Msg("=== QuestMods 1.14.0: experimental Quest Mods wheel ===");
+            LoggerInstance.Msg("=== QuestMods 1.14.1: experimental Quest Mods wheel ===");
             PatchInitializers();
             GrabbyHands.Install(HarmonyInstance);
             SuperSpeed.Install();
@@ -3693,7 +3696,7 @@ namespace QuestMods
             {
                 object color = ColorValue(r, g, b);
                 if (color == null) return;
-                object property = material.GetType().GetProperty("color", I);
+                PropertyInfo property = material.GetType().GetProperty("color", I);
                 if (property != null && property.GetSetMethod(true) != null)
                 {
                     try { property.SetValue(material, color); return; } catch { }

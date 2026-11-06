@@ -9,7 +9,7 @@ This is a handoff for a developer or future AI assistant working on this project
 
 CURRENT STATUS — READ THIS FIRST
 --------------------------------
-Latest source: Class1.cs (QuestMods 1.14.0 in this repository)
+Latest source: Class1.cs (QuestMods 1.14.1 in this repository)
 Latest version actually tested by the user: QuestMods 1.11.0 ran on the Quest (log supplied). Colours were confirmed good ("colors are nice"), the local PlayerCharacter resolved but Super Speed still changed no speed ("No readable stat manager on the local character."), and Grabby Hands could still not grab from back hands or pockets.
 Latest version tested by the user: 1.12.0. It gave NO keyboard at all ("right now there's also no keyboard"), which is what 1.14.0 fixes.
 Status of 1.14.0: produced and statically checked (tree-sitter parse, balanced braces, no unused private fields) only. It has NOT been compiled by the assistant and has NOT been run on the Quest. The in-world keyboard is the largest unverified piece: panel placement, TextMesh size, the trigger read and the raycast are all best-effort guesses and every failure path is logged with a [Keyboard] prefix.
@@ -30,6 +30,10 @@ WHAT THE 1.11.0 LOG SHOWED (facts, from the user's log)
 - Grabby Hands now reaches the body slots: "target=Back Slot ... Interacting=True held=Bag(Clone)", "target=Pouch Slot Right", "target=Dock MR", "target=StockDock". The unmasked 2.5 m hand sweep is what finds them; the game's own capsule returns 0 colliders in a crowd.
 - Grab by Name was created and tinted but had no keyword: every press logged "No keyword set...", so the feature never ran a scan.
 - The old "Grabby Hands only reaches the forward capsule" failure is gone; the user's remaining complaint is "i still cant grab from other people".
+
+1.14.1 COMPILE FIX
+------------------
+The first 1.14.0 build did not compile: QuestKeyboard.SetColor declared "object property = material.GetType().GetProperty(...)" and then called GetSetMethod/SetValue on it (CS1061 twice). It is now a PropertyInfo. No behaviour changed. Everything else in 1.14.0 is unchanged and still untested on the headset.
 
 1.14.0 CHANGE — ONE BUBBLE, MOD-OWNED KEYBOARD
 ----------------------------------------------
