@@ -1,18 +1,32 @@
-﻿// QuestMods 1.9.6 - existing Questmods mod with experimental developer wheel bridge.
+// QuestMods 1.9.6 - existing Questmods mod with experimental developer wheel bridge.
 // Experimental native 3D nested wheel, not a tablet or rectangular panel.
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Threading;
 using HarmonyLib;
+using Il2Cpp;
 using Il2CppAlta.Api.DataTransferModels.Models.Shared;
+using Il2CppAlta.Character;
+using Il2CppAlta.Crafting;
+using Il2CppAlta.Inventory;
+using Il2CppAlta.Networking.Scripts.Player;
 using Il2CppAlta.QuickAccessActions;
+using Il2CppAlta.StatSystem;
+using Il2CppFeatures.Climbing;
+using Il2CppInterop.Runtime.InteropTypes.Arrays;
+using Il2CppTownship.Downed;
 using MelonLoader;
+using MelonLoader.Utils;
+using TabletUILib;
+using UnityEngine;
 
 [assembly: MelonInfo(typeof(QuestMods.Mod), "QuestMods", "1.9.6", "you")]
 [assembly: MelonGame(null, null)]
+[assembly: MelonAdditionalDependencies("TabletUILib")]
 
 namespace QuestMods
 {
@@ -37,7 +51,1430 @@ namespace QuestMods
             nextReport = DateTime.UtcNow.AddSeconds(20);
             try { TabletProbe.Initialize(); DevWheelBridge.Initialize(); }
             catch (Exception ex) { LoggerInstance.Warning("Tablet probe setup failed: " + ex); }
+            try { InitTabletUI(); }
+            catch (Exception ex) { LoggerInstance.Warning("[TabletUI] Setup failed: " + ex); }
             LoggerInstance.Warning("Debug movement is not automatically enabled. Experimental IsIgnored overrides remain enabled.");
+        }
+
+        private static MelonPreferences_Entry<bool> prefGrabbyHands;
+        private static MelonPreferences_Entry<bool> prefSuperSpeed;
+        private static MelonPreferences_Entry<bool> prefFly;
+        private static MelonPreferences_Entry<bool> prefAirGrab;
+        private static MelonPreferences_Entry<bool> prefAnyConnect;
+        private static MelonPreferences_Entry<bool> prefAutoRevive;
+        private static MelonPreferences_Entry<bool> prefNoclip;
+        private static MelonPreferences_Entry<bool> prefDurability;
+        private static MelonPreferences_Entry<bool> prefNoSocial;
+        private static MelonPreferences_Entry<bool> prefDevLight;
+        private static bool lastDevLightPref;
+        private static MelonPreferences_Entry<bool> prefMakePearl;
+        private static bool lastGrabbyPref, lastSpeedPref, lastFlyPref, lastNoclipPref, lastDurabilityPref;
+
+        private void InitTabletUI()
+        {
+            var category = MelonPreferences.CreateCategory("QuestMods", "Quest Mods");
+            prefGrabbyHands = category.CreateEntry("GrabbyHands", false, "Grabby Hands");
+            prefSuperSpeed = category.CreateEntry("SuperSpeed", false, "Super Speed (5x)");
+            prefFly = category.CreateEntry("Fly", false, "Fly (Debug Movement)");
+            prefAirGrab = category.CreateEntry("AirGrab", false, "Air Grab");
+            prefAnyConnect = category.CreateEntry("AnyConnect", false, "Any Connect");
+            prefAutoRevive = category.CreateEntry("AutoRevive", false, "Auto Revive");
+            prefNoclip = category.CreateEntry("Noclip", false, "Noclip");
+            prefDurability = category.CreateEntry("ShowDurability", false, "Show Durability");
+            prefNoSocial = category.CreateEntry("NoSocial", false, "No Social");
+            prefDevLight = category.CreateEntry("DevLight", false, "Dev Light");
+            prefMakePearl = category.CreateEntry("MakePearl", false, "Make Pearl");
+
+            prefGrabbyHands.Value = false;
+            prefSuperSpeed.Value = false;
+            prefFly.Value = false;
+            prefAirGrab.Value = false;
+            prefAnyConnect.Value = false;
+            prefAutoRevive.Value = false;
+            prefNoclip.Value = false;
+            prefDurability.Value = false;
+            prefNoSocial.Value = false;
+            prefDevLight.Value = false;
+            prefMakePearl.Value = false;
+
+            InstallExtraPatches(HarmonyInstance);
+
+            TabletUI.AddBubble("quest mods", "QM")
+                .App("tablet", "TAB", BuildTabletPage)
+                .App("tps", "TP", BuildPlayerTPsPage)
+                .App("customs", "SAV", BuildCustomTPsPage)
+                .App("caves", "CAV", BuildCavesPage);
+
+            LoggerInstance.Msg("[TabletUI] Registered 'quest mods' bubble with tablet app.");
+        }
+
+        private static Page BuildTabletPage()
+        {
+            return new Page("QUEST MODS", "Toggles & Actions")
+                .Toggle("Grabby Hands", prefGrabbyHands)
+                .Toggle("Super Speed (5x)", prefSuperSpeed)
+                .Toggle("Fly", prefFly)
+                .Button("Grab Coins", () => GrabCoins())
+                .Button("Pouch Limit: " + (pouchLimit > 0 ? pouchLimit.ToString() : "OFF (100)"), () => CyclePouchLimit())
+                .Button("Make Day", () => MakeDay())
+                .Button("Player TPs", () => OpenPlayerTPs())
+                .Toggle("Air Grab", prefAirGrab)
+                .Toggle("Any Connect", prefAnyConnect)
+                .Toggle("Auto Revive", prefAutoRevive)
+                .Toggle("Noclip", prefNoclip)
+                .Toggle("Show Durability", prefDurability)
+                .Toggle("No Social", prefNoSocial)
+                .Toggle("Dev Light", prefDevLight)
+                .Toggle("Make Pearl", prefMakePearl);
+        }
+
+        private static void SyncTabletToggles()
+        {
+            if (prefGrabbyHands != null)
+            {
+                if (prefGrabbyHands.Value != lastGrabbyPref)
+                {
+                    lastGrabbyPref = prefGrabbyHands.Value;
+                    GrabbyHands.SetEnabled(lastGrabbyPref);
+                }
+                else if (GrabbyHands.IsEnabled != lastGrabbyPref)
+                {
+                    lastGrabbyPref = GrabbyHands.IsEnabled;
+                    prefGrabbyHands.Value = lastGrabbyPref;
+                }
+            }
+
+            if (prefSuperSpeed != null && prefSuperSpeed.Value != lastSpeedPref)
+            {
+                lastSpeedPref = prefSuperSpeed.Value;
+                ApplySuperSpeed(lastSpeedPref);
+            }
+
+            if (prefFly != null && prefFly.Value != lastFlyPref)
+            {
+                lastFlyPref = prefFly.Value;
+                ApplyFly(lastFlyPref);
+                if (!lastFlyPref && prefNoclip != null && prefNoclip.Value)
+                {
+                    prefNoclip.Value = false;
+                }
+            }
+
+            if (prefNoclip != null && prefNoclip.Value != lastNoclipPref)
+            {
+                lastNoclipPref = prefNoclip.Value;
+                ApplyNoclip(lastNoclipPref);
+            }
+
+            if (prefDevLight != null && prefDevLight.Value != lastDevLightPref)
+            {
+                lastDevLightPref = prefDevLight.Value;
+                ApplyDevLight(lastDevLightPref);
+            }
+
+            if (prefDurability != null)
+            {
+                if (prefDurability.Value != lastDurabilityPref)
+                {
+                    lastDurabilityPref = prefDurability.Value;
+                    if (!lastDurabilityPref) ClearDurabilityDisplays();
+                }
+                if (lastDurabilityPref) UpdateDurabilityDisplay();
+            }
+
+            if (prefNoSocial != null && prefNoSocial.Value)
+                TickAutoGrabTablet();
+
+            TickMakePearl();
+            TickCaveTeleport();
+            UpdateWaypointKeyboard();
+
+            if (prefAutoRevive != null && prefAutoRevive.Value)
+            {
+                AutoReviveUpdate();
+            }
+        }
+
+        private static void ApplySuperSpeed(bool enabled)
+        {
+            try
+            {
+                PlayerController pc = PlayerController.Current;
+                if (pc == null) { MelonLogger.Warning("[QuestMods] SuperSpeed: PlayerController.Current is null."); return; }
+                PlayerCharacter playerCharacter = pc.TryCast<PlayerCharacter>();
+                if (playerCharacter != null && playerCharacter.Health != null && playerCharacter.Health.StatManager != null)
+                {
+                    if (playerCharacter.Health.StatManager.GetStat("speed", out Stat stat) && stat != null)
+                    {
+                        stat.Base = enabled ? 5f : 1f;
+                        MelonLogger.Msg("[QuestMods] Super Speed " + (enabled ? "ON (5x)" : "OFF (1x)") + ".");
+                        return;
+                    }
+                }
+                MelonLogger.Warning("[QuestMods] SuperSpeed: could not get 'speed' stat on PlayerCharacter.");
+            }
+            catch (Exception ex) { MelonLogger.Warning("[QuestMods] ApplySuperSpeed failed: " + ex.Message); }
+        }
+
+        private static void ApplyFly(bool enabled)
+        {
+            try
+            {
+                PlayerController pc = PlayerController.Current;
+                if (pc == null) { MelonLogger.Warning("[QuestMods] Fly: PlayerController.Current is null."); return; }
+                SmoothLocomotionPlayerController slpc = pc.TryCast<SmoothLocomotionPlayerController>();
+                if (slpc != null && slpc.SmoothLocomotion != null)
+                {
+                    if (slpc.SmoothLocomotion.IsDebugMovement != enabled)
+                        slpc.SmoothLocomotion.ToggleDebug();
+                    MelonLogger.Msg("[QuestMods] Fly (Debug Movement) " + (enabled ? "ON" : "OFF") + ".");
+                }
+                else
+                {
+                    MelonLogger.Warning("[QuestMods] Fly: SmoothLocomotionPlayerController not found.");
+                }
+            }
+            catch (Exception ex) { MelonLogger.Warning("[QuestMods] ApplyFly failed: " + ex.Message); }
+        }
+
+        private static int noclipPlayerLayer = -1, noclipTerrainLayer = -1;
+        private static void ApplyNoclip(bool enabled)
+        {
+            try
+            {
+                if (!EnsurePhysicsReflection()) { MelonLogger.Warning("[QuestMods] Noclip: Physics reflection failed."); return; }
+                MethodInfo ignoreCol = physType.GetMethod("IgnoreLayerCollision", new Type[] { typeof(int), typeof(int), typeof(bool) });
+                if (ignoreCol == null) { MelonLogger.Warning("[QuestMods] Noclip: IgnoreLayerCollision not found."); return; }
+
+                if (!enabled)
+                {
+                    if (noclipPlayerLayer != -1 && noclipTerrainLayer != -1)
+                        ignoreCol.Invoke(null, new object[] { noclipPlayerLayer, noclipTerrainLayer, false });
+                    MelonLogger.Msg("[QuestMods] Noclip OFF.");
+                    return;
+                }
+
+                if (noclipTerrainLayer == -1 && MasterTerrain.Instance != null && MasterTerrain.Instance.Terrain != null)
+                    noclipTerrainLayer = MasterTerrain.Instance.Terrain.gameObject.layer;
+
+                SmoothLocomotionPlayerController slpc = PlayerController.Current == null ? null : PlayerController.Current.TryCast<SmoothLocomotionPlayerController>();
+                if (slpc != null && slpc.SmoothLocomotion != null && slpc.SmoothLocomotion.CharacterController != null)
+                    noclipPlayerLayer = slpc.SmoothLocomotion.CharacterController.gameObject.layer;
+
+                if (noclipPlayerLayer != -1 && noclipTerrainLayer != -1)
+                {
+                    ignoreCol.Invoke(null, new object[] { noclipPlayerLayer, noclipTerrainLayer, true });
+                    MelonLogger.Msg("[QuestMods] Noclip ON (layers " + noclipPlayerLayer + " / " + noclipTerrainLayer + ").");
+                }
+                else
+                {
+                    MelonLogger.Warning("[QuestMods] Noclip: layers not ready (player=" + noclipPlayerLayer + ", terrain=" + noclipTerrainLayer + ").");
+                }
+            }
+            catch (Exception ex) { MelonLogger.Warning("[QuestMods] ApplyNoclip failed: " + ex.Message); }
+        }
+
+        private static int GrabCoins()
+        {
+            try
+            {
+                Interactor localInteractor = null;
+                foreach (UnityEngine.Object obj in UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.Of<Interactor>()))
+                {
+                    Interactor inter = obj.TryCast<Interactor>();
+                    if (inter != null && inter.IsLocal)
+                    {
+                        localInteractor = inter;
+                        break;
+                    }
+                }
+                if (localInteractor == null)
+                {
+                    MelonLogger.Warning("[QuestMods] GrabCoins failed: no local interactor.");
+                    return 0;
+                }
+
+                int grabbed = 0;
+                foreach (UnityEngine.Object obj in UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.Of<Pickup>()))
+                {
+                    Pickup pickup = obj.TryCast<Pickup>();
+                    if (pickup == null || pickup.name == null) continue;
+                    if (pickup.name.IndexOf("coin", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    try
+                    {
+                        if (pickup.IsDocked)
+                        {
+                            MethodInfo undock = pickup.GetType().GetMethod("Undock", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                            undock?.Invoke(pickup, new object[] { localInteractor, true, 1 });
+                        }
+                        MethodInfo resetTimeout = localInteractor.GetType().GetMethod("ResetTimeout", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                        resetTimeout?.Invoke(localInteractor, null);
+                        localInteractor.StartInteract(pickup, false, false, false);
+                        grabbed++;
+                    }
+                    catch { }
+                }
+                MelonLogger.Msg("[QuestMods] GrabCoins: grabbed " + grabbed + " coin(s).");
+                return grabbed;
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning("[QuestMods] GrabCoins failed: " + ex.Message);
+                return 0;
+            }
+        }
+
+        private static void InstallExtraPatches(global::HarmonyLib.Harmony harmony)
+        {
+            if (harmony == null) return;
+            try
+            {
+                MethodInfo checkGrab = AccessTools.Method(typeof(ClimbingHand), "CheckGrab", null, null);
+                if (checkGrab != null)
+                {
+                    harmony.Patch(checkGrab,
+                        prefix: new HarmonyMethod(typeof(Mod).GetMethod(nameof(CheckGrabPrefix), BindingFlags.Static | BindingFlags.NonPublic)),
+                        postfix: new HarmonyMethod(typeof(Mod).GetMethod(nameof(CheckGrabPostfix), BindingFlags.Static | BindingFlags.NonPublic)));
+                    MelonLogger.Msg("[QuestMods] Patched ClimbingHand.CheckGrab for Air Grab.");
+                }
+            }
+            catch (Exception ex) { MelonLogger.Warning("[QuestMods] AirGrab patch failed: " + ex.Message); }
+
+            try
+            {
+                MethodInfo supports = AccessTools.Method(typeof(JointSlot), "Supports", new Type[] { typeof(JointInsertType) }, null);
+                if (supports != null)
+                    harmony.Patch(supports, postfix: new HarmonyMethod(typeof(Mod).GetMethod(nameof(SupportsPostfix), BindingFlags.Static | BindingFlags.NonPublic)));
+                foreach (Type t in new[] { typeof(CraftingPart), typeof(ConfirmationCraftingPart) })
+                {
+                    MethodInfo attempt = AccessTools.Method(t, "AttemptCraft", new Type[] { typeof(JointSlot) }, null);
+                    if (attempt != null)
+                        harmony.Patch(attempt, postfix: new HarmonyMethod(typeof(Mod).GetMethod(nameof(AttemptCraftPostfix), BindingFlags.Static | BindingFlags.NonPublic)));
+                }
+                MethodInfo tryConnect = AccessTools.Method(typeof(JointSlot), "TryConnect", null, null);
+                if (tryConnect != null)
+                    harmony.Patch(tryConnect, prefix: new HarmonyMethod(typeof(Mod).GetMethod(nameof(TryConnectPrefix), BindingFlags.Static | BindingFlags.NonPublic)));
+                MethodInfo craftWith = AccessTools.Method(typeof(CraftingPart), "CraftWithSlot", null, null);
+                if (craftWith != null)
+                    harmony.Patch(craftWith, prefix: new HarmonyMethod(typeof(Mod).GetMethod(nameof(CraftWithSlotPrefix), BindingFlags.Static | BindingFlags.NonPublic)));
+                MelonLogger.Msg("[QuestMods] Patched JointSlot/CraftingPart for Any Connect.");
+
+                MethodInfo unlockCheck = AccessTools.Method(typeof(PlayerUnlockManager), "Check", null, null);
+                if (unlockCheck != null)
+                {
+                    harmony.Patch(unlockCheck, postfix: new HarmonyMethod(typeof(Mod).GetMethod(nameof(UnlockCheckPostfix), BindingFlags.Static | BindingFlags.NonPublic)));
+                    MelonLogger.Msg("[QuestMods] Patched PlayerUnlockManager.Check for Air Grab.");
+                }
+
+                MethodInfo maxQty = AccessTools.PropertyGetter(typeof(PickupDock), "MaxQuantityCurrentlyPossible");
+                if (maxQty != null)
+                {
+                    harmony.Patch(maxQty, postfix: new HarmonyMethod(typeof(Mod).GetMethod(nameof(PouchMaxQuantityPostfix), BindingFlags.Static | BindingFlags.NonPublic)));
+                    MelonLogger.Msg("[QuestMods] Patched PickupDock.MaxQuantityCurrentlyPossible for Pouch Limit.");
+                }
+
+                MethodInfo moveToSafety = AccessTools.Method(typeof(SmoothLocomotion), "MoveToSafety", null, null);
+                if (moveToSafety != null)
+                {
+                    harmony.Patch(moveToSafety, prefix: new HarmonyMethod(typeof(Mod).GetMethod(nameof(MoveToSafetyPrefix), BindingFlags.Static | BindingFlags.NonPublic)));
+                    MelonLogger.Msg("[QuestMods] Patched SmoothLocomotion.MoveToSafety for Noclip No-Void-TP.");
+                }
+
+                MethodInfo handleClimbing = AccessTools.Method(typeof(ClimbingHandler), "HandleClimbing", null, null);
+                if (handleClimbing != null)
+                {
+                    harmony.Patch(handleClimbing, postfix: new HarmonyMethod(typeof(Mod).GetMethod(nameof(HandleClimbingPostfix), BindingFlags.Static | BindingFlags.NonPublic)));
+                    MelonLogger.Msg("[QuestMods] Patched ClimbingHandler.HandleClimbing for Air Grab infinite stamina.");
+                }
+            }
+            catch (Exception ex) { MelonLogger.Warning("[QuestMods] AnyConnect/Extra patch failed: " + ex.Message); }
+        }
+
+        private static void UnlockCheckPostfix(ref bool __result)
+        {
+            if (prefAirGrab != null && prefAirGrab.Value) __result = true;
+        }
+
+        private static void HandleClimbingPostfix(ClimbingHandler __instance)
+        {
+            if (prefAirGrab == null || !prefAirGrab.Value || __instance == null) return;
+            try
+            {
+                if (__instance.Settings != null)
+                {
+                    FieldInfo f = typeof(ClimbingSettings).GetField("staminaLossPerSecond", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                    f?.SetValue(__instance.Settings, 0f);
+                }
+                foreach (var mgr in new[] { __instance.LeftStamina, __instance.RightStamina })
+                {
+                    var hsm = mgr?.TryCast<HandStaminaManager>();
+                    if (hsm != null && hsm.Stamina != null)
+                        hsm.Stamina.Base = hsm.Stamina.Maximum;
+                }
+            }
+            catch { }
+        }
+
+        private static float lastTabletGrabTime = -999f;
+        private static void TickAutoGrabTablet()
+        {
+            if (Time.time - lastTabletGrabTime < 0.25f) return;
+            lastTabletGrabTime = Time.time;
+            var myPc = PlayerController.Current;
+            if (myPc == null) return;
+            var myInteractor = myPc.RightController?.Interactor;
+            if (myInteractor == null) return;
+
+            foreach (var pickup in UnityEngine.Object.FindObjectsOfType<Pickup>())
+            {
+                if (pickup == null) continue;
+                string pName = pickup.name?.ToLower() ?? "";
+                if (!pName.Contains("tablet")) continue;
+                if (myInteractor.IsInteracting && myInteractor.InteractingWith != null && myInteractor.InteractingWith.Pointer == pickup.Pointer)
+                    continue;
+                try
+                {
+                    foreach (var interactor in UnityEngine.Object.FindObjectsOfType<Interactor>())
+                    {
+                        if (interactor == null || interactor.Pointer == myInteractor.Pointer) continue;
+                        if (interactor.IsInteracting && interactor.InteractingWith != null && interactor.InteractingWith.Pointer == pickup.Pointer)
+                            interactor.StopInteract(false);
+                    }
+                    if (pickup.IsDocked) pickup.Undock(myInteractor, true, 1);
+                    myInteractor.ResetTimeout();
+                    myInteractor.StartInteract(pickup, false, false, false);
+                    return;
+                }
+                catch { }
+            }
+        }
+
+        private static float caveTpActiveUntil = -1f;
+        private static float caveTpEndTime = -1f;
+        private static Vector3 caveTpTargetPos;
+        private static string caveTpLabel;
+        private static float caveTpNextTime;
+        private static int currentCaveLayer = 0;
+        private static GameObject caveRenderLabelObj;
+        private static Component caveRenderLabelTm;
+
+        private static void StartCaveTeleportSequence(Vector3 pos, string label, int targetLayer)
+        {
+            int diff = Math.Abs(targetLayer - currentCaveLayer);
+            currentCaveLayer = targetLayer;
+            float duration = diff >= 25 ? 45f : (diff >= 15 ? 30f : 3f);
+
+            caveTpTargetPos = pos;
+            caveTpLabel = label;
+            caveTpEndTime = Time.time + duration;
+            caveTpNextTime = Time.time + 0.5f;
+            caveTpActiveUntil = Time.time + duration + 5f;
+
+            var sl = UnityEngine.Object.FindObjectOfType<SmoothLocomotion>();
+            if (sl != null) sl.enabled = false;
+
+            if (duration >= 30f)
+            {
+                EnsureTextMeshReflection();
+                if (caveRenderLabelObj != null) UnityEngine.Object.Destroy(caveRenderLabelObj);
+                if (textMeshType != null)
+                {
+                    caveRenderLabelObj = new GameObject("QuestMods_CaveRendering");
+                    caveRenderLabelTm = caveRenderLabelObj.AddComponent(Il2CppType.From(textMeshType));
+                    object typed = typeof(Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase).GetMethod("TryCast", BindingFlags.Instance | BindingFlags.Public)?.MakeGenericMethod(textMeshType).Invoke(caveRenderLabelTm, null);
+                    if (typed != null)
+                    {
+                        tmCharSizeProp?.SetValue(typed, 0.04f);
+                        tmColorProp?.SetValue(typed, Color.yellow);
+                        tmAnchorProp?.SetValue(typed, 4);
+                        tmAlignProp?.SetValue(typed, 1);
+                    }
+                }
+            }
+
+            TeleportLocalPlayer(pos, label);
+        }
+
+        private static void TickCaveTeleport()
+        {
+            if (caveTpEndTime < 0f) return;
+
+            if (caveRenderLabelObj != null && Camera.main != null)
+            {
+                Transform cam = Camera.main.transform;
+                caveRenderLabelObj.transform.position = cam.position + cam.forward * 1.2f;
+                caveRenderLabelObj.transform.rotation = Quaternion.LookRotation(cam.forward, Vector3.up);
+                if (caveRenderLabelTm != null && textMeshType != null)
+                {
+                    int secsLeft = Mathf.CeilToInt(Mathf.Max(0f, caveTpEndTime - Time.time));
+                    object typed = typeof(Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase).GetMethod("TryCast", BindingFlags.Instance | BindingFlags.Public)?.MakeGenericMethod(textMeshType).Invoke(caveRenderLabelTm, null);
+                    if (typed != null) tmTextProp?.SetValue(typed, "Rendering... " + secsLeft + "s");
+                }
+            }
+
+            if (Time.time >= caveTpEndTime)
+            {
+                caveTpEndTime = -1f;
+                if (caveRenderLabelObj != null)
+                {
+                    UnityEngine.Object.Destroy(caveRenderLabelObj);
+                    caveRenderLabelObj = null;
+                    caveRenderLabelTm = null;
+                }
+                var sl = UnityEngine.Object.FindObjectOfType<SmoothLocomotion>();
+                if (sl != null) sl.enabled = true;
+                return;
+            }
+
+            if (Time.time >= caveTpNextTime)
+            {
+                caveTpNextTime = Time.time + 0.5f;
+                TeleportLocalPlayer(caveTpTargetPos, caveTpLabel);
+            }
+        }
+
+        private static bool MoveToSafetyPrefix()
+        {
+            if (prefNoclip != null && prefNoclip.Value) return false;
+            if (Time.time < caveTpActiveUntil) return false;
+            return true;
+        }
+
+        private static int pouchLimit = 0; // 0 = OFF (normal 100), else 1000..5000
+        private static void PouchMaxQuantityPostfix(ref int __result)
+        {
+            if (pouchLimit > 0 && __result >= 10) __result = pouchLimit;
+        }
+
+        private static void CyclePouchLimit()
+        {
+            if (pouchLimit == 0) pouchLimit = 1000;
+            else if (pouchLimit < 5000) pouchLimit += 1000;
+            else pouchLimit = 0;
+
+            string msgText = pouchLimit > 0 ? ("Pouch Limit: " + pouchLimit) : "Pouch Limit: OFF (100)";
+            MelonLogger.Msg("[QuestMods] " + msgText);
+        }
+
+        private static float nextDurabilityUpdate;
+        private static readonly Dictionary<IntPtr, Component> durabilityLabels = new Dictionary<IntPtr, Component>();
+        private static Type textMeshType;
+        private static PropertyInfo tmTextProp, tmColorProp, tmCharSizeProp, tmFontSizeProp, tmAlignProp, tmAnchorProp;
+
+        private static bool EnsureTextMeshReflection()
+        {
+            if (textMeshType != null) return tmTextProp != null;
+            foreach (Assembly a in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                textMeshType = a.GetType("UnityEngine.TextMesh", false);
+                if (textMeshType != null) break;
+            }
+            if (textMeshType != null)
+            {
+                tmTextProp = textMeshType.GetProperty("text");
+                tmColorProp = textMeshType.GetProperty("color");
+                tmCharSizeProp = textMeshType.GetProperty("characterSize");
+                tmFontSizeProp = textMeshType.GetProperty("fontSize");
+                tmAlignProp = textMeshType.GetProperty("alignment");
+                tmAnchorProp = textMeshType.GetProperty("anchor");
+            }
+            return tmTextProp != null;
+        }
+
+        private static void ClearDurabilityDisplays()
+        {
+            foreach (var kv in durabilityLabels)
+            {
+                if (kv.Value != null && !kv.Value.WasCollected && kv.Value.gameObject != null)
+                    UnityEngine.Object.Destroy(kv.Value.gameObject);
+            }
+            durabilityLabels.Clear();
+        }
+
+        private static void UpdateDurabilityDisplay()
+        {
+            if (Time.time < nextDurabilityUpdate) return;
+            nextDurabilityUpdate = Time.time + 0.25f;
+            if (!EnsureTextMeshReflection()) return;
+            Camera cam = Camera.main;
+            foreach (DurabilityModule dm in UnityEngine.Object.FindObjectsOfType<DurabilityModule>())
+            {
+                if (dm == null || dm.WasCollected) continue;
+                if (!durabilityLabels.TryGetValue(dm.Pointer, out Component tm) || tm == null || tm.WasCollected)
+                {
+                    GameObject go = new GameObject("QuestMods_DurabilityLabel");
+                    go.transform.SetParent(dm.transform, false);
+                    go.transform.localPosition = new Vector3(0f, 0.15f, 0f);
+                    tm = go.AddComponent(Il2CppInterop.Runtime.Il2CppType.From(textMeshType));
+                    if (tm != null)
+                    {
+                        MethodInfo tryCast = typeof(Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase).GetMethod("TryCast", BindingFlags.Instance | BindingFlags.Public)?.MakeGenericMethod(textMeshType);
+                        if (tryCast != null) tm = tryCast.Invoke(tm, null) as Component ?? tm;
+                    }
+                    if (tm == null) continue;
+                    tmCharSizeProp?.SetValue(tm, 0.02f);
+                    tmFontSizeProp?.SetValue(tm, 32);
+                    if (tmAlignProp != null) tmAlignProp.SetValue(tm, Enum.ToObject(tmAlignProp.PropertyType, 1)); // Center
+                    if (tmAnchorProp != null) tmAnchorProp.SetValue(tm, Enum.ToObject(tmAnchorProp.PropertyType, 4)); // MiddleCenter
+                    durabilityLabels[dm.Pointer] = tm;
+                }
+                int pct = Mathf.Clamp(Mathf.RoundToInt(dm.Integrity * 100f), 0, 100);
+                tmTextProp?.SetValue(tm, pct + "%");
+                tmColorProp?.SetValue(tm, Color.Lerp(Color.red, Color.green, dm.Integrity));
+                if (cam != null)
+                    tm.transform.rotation = Quaternion.LookRotation(tm.transform.position - cam.transform.position);
+            }
+        }
+
+        private static void OpenPlayerTPs()
+        {
+            try
+            {
+                MethodInfo openPage = typeof(TabletUI).GetMethod("OpenPage", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+                    ?? typeof(TabletUI).GetMethod("Navigate", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+                    ?? typeof(TabletUI).GetMethod("ShowPage", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                Page page = BuildPlayerTPsPage();
+                if (openPage != null) openPage.Invoke(null, new object[] { page });
+                else MelonLogger.Warning("[QuestMods] TabletUI navigation method not found.");
+            }
+            catch (Exception ex) { MelonLogger.Warning("[QuestMods] OpenPlayerTPs failed: " + ex.Message); }
+        }
+
+        private static string WaypointsFilePath => Path.Combine(MelonEnvironment.UserDataDirectory, "questmods_waypoints.txt");
+
+        private static void ApplyDevLight(bool enable)
+        {
+            try
+            {
+                var pc = PlayerController.Current;
+                if (pc == null) { MelonLogger.Warning("[QuestMods] Dev Light: local player not ready."); return; }
+                foreach (var ctrl in new[] { pc.LeftController, pc.RightController })
+                {
+                    if (ctrl == null) continue;
+                    var lh = ctrl.GetControllerExtension<LightHands>();
+                    if (lh != null && lh.enabled != enable)
+                        lh.Toggle();
+                }
+                MelonLogger.Msg("[QuestMods] Dev Light " + (enable ? "enabled" : "disabled") + ".");
+            }
+            catch (Exception ex) { MelonLogger.Warning("[QuestMods] ApplyDevLight failed: " + ex.Message); }
+        }
+
+        private static int pendingDeleteIndex = -1;
+
+        private static List<(string Name, Vector3 Pos)> LoadWaypoints()
+        {
+            var list = new List<(string Name, Vector3 Pos)>();
+            try
+            {
+                if (!File.Exists(WaypointsFilePath)) return list;
+                int autoIdx = 1;
+                foreach (string line in File.ReadAllLines(WaypointsFilePath))
+                {
+                    if (string.IsNullOrWhiteSpace(line)) continue;
+                    string trimmed = line.Trim();
+                    string name = "TP " + autoIdx;
+                    string coordsPart = trimmed;
+                    int sep = trimmed.IndexOf('|');
+                    if (sep >= 0)
+                    {
+                        name = trimmed.Substring(0, sep).Trim();
+                        if (string.IsNullOrEmpty(name)) name = "TP " + autoIdx;
+                        coordsPart = trimmed.Substring(sep + 1).Trim();
+                    }
+                    string[] parts = coordsPart.Split(',');
+                    if (parts.Length == 3 &&
+                        float.TryParse(parts[0], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float x) &&
+                        float.TryParse(parts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float y) &&
+                        float.TryParse(parts[2], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float z))
+                    {
+                        list.Add((name, new Vector3(x, y, z)));
+                        autoIdx++;
+                    }
+                }
+            }
+            catch (Exception ex) { MelonLogger.Warning("[QuestMods] LoadWaypoints failed: " + ex.Message); }
+            return list;
+        }
+
+        private static void SaveWaypointWithPos(string name, Vector3 pos)
+        {
+            try
+            {
+                string cleanName = string.IsNullOrWhiteSpace(name) ? ("TP " + (LoadWaypoints().Count + 1)) : name.Replace("|", "").Trim();
+                string line = string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0}|{1:F3},{2:F3},{3:F3}", cleanName, pos.x, pos.y, pos.z);
+                File.AppendAllText(WaypointsFilePath, line + Environment.NewLine);
+                MelonLogger.Msg("[QuestMods] Saved waypoint: " + line);
+            }
+            catch (Exception ex) { MelonLogger.Warning("[QuestMods] SaveWaypointWithPos failed: " + ex.Message); }
+        }
+
+        private static void DeleteWaypoint(int index)
+        {
+            try
+            {
+                if (pendingDeleteIndex != index)
+                {
+                    pendingDeleteIndex = index;
+                    MelonLogger.Msg("[QuestMods] Are you sure? Click Del again to confirm deleting waypoint #" + (index + 1));
+                    return;
+                }
+                pendingDeleteIndex = -1;
+                var list = LoadWaypoints();
+                if (index < 0 || index >= list.Count) return;
+                list.RemoveAt(index);
+                var lines = new List<string>(list.Count);
+                foreach (var wp in list)
+                    lines.Add(string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0}|{1:F3},{2:F3},{3:F3}", wp.Name, wp.Pos.x, wp.Pos.y, wp.Pos.z));
+                File.WriteAllLines(WaypointsFilePath, lines);
+                MelonLogger.Msg("[QuestMods] Deleted waypoint #" + (index + 1));
+            }
+            catch (Exception ex) { MelonLogger.Warning("[QuestMods] DeleteWaypoint failed: " + ex.Message); }
+        }
+
+        private static GameObject kbRoot;
+        private static LineRenderer kbRay;
+        private static Component kbPreviewText;
+        private static string kbTypedName = "";
+        private static Vector3 kbPendingPos = Vector3.zero;
+        private static readonly List<(GameObject Obj, string Key)> kbKeys = new List<(GameObject, string)>();
+
+        private static void OpenWaypointKeyboard()
+        {
+            try
+            {
+                CloseWaypointKeyboard();
+                var pc = PlayerController.Current;
+                if (pc == null) { MelonLogger.Warning("[QuestMods] Save Pos: local player not ready."); return; }
+                kbPendingPos = pc.PlayerFeetPosition;
+                kbTypedName = "";
+
+                Transform cam = Camera.main != null ? Camera.main.transform : pc.transform;
+                Vector3 headPos = (Camera.main != null && Camera.main.transform.position.y > pc.PlayerFeetPosition.y + 0.3f) ? Camera.main.transform.position : (pc.PlayerFeetPosition + Vector3.up * 1.35f);
+                Vector3 fwd = cam.forward; fwd.y = 0f;
+                if (fwd.sqrMagnitude < 0.001f) fwd = Vector3.forward;
+                fwd.Normalize();
+
+                kbRoot = new GameObject("QuestMods_VRKeyboard");
+                kbRoot.transform.position = headPos + fwd * 0.85f;
+                kbRoot.transform.rotation = Quaternion.LookRotation(fwd, Vector3.up);
+
+                GameObject prevObj = GameObject.CreatePrimitive(PrimitiveType.Cube);
+                prevObj.transform.SetParent(kbRoot.transform, false);
+                prevObj.transform.localPosition = new Vector3(0f, 0.28f, 0f);
+                prevObj.transform.localScale = new Vector3(0.85f, 0.09f, 0.02f);
+                var prevRend = prevObj.GetComponent<Renderer>();
+                if (prevRend != null) prevRend.material.color = new Color(0.12f, 0.12f, 0.12f, 1f);
+                kbPreviewText = CreateKeyboardLabel(prevObj.transform, "Name: _", 0.03f);
+
+                string[] rows = new[]
+                {
+                    "1 2 3 4 5 6 7 8 9 0",
+                    "Q W E R T Y U I O P",
+                    "A S D F G H J K L",
+                    "Z X C V B N M",
+                    "SPACE BACK SAVE CANCEL"
+                };
+
+                for (int r = 0; r < rows.Length; r++)
+                {
+                    string[] tokens = rows[r].Split(' ');
+                    float spacing = (r == rows.Length - 1) ? 0.21f : 0.085f;
+                    float startX = -((tokens.Length - 1) * spacing) * 0.5f;
+                    float y = 0.16f - r * 0.095f;
+                    for (int c = 0; c < tokens.Length; c++)
+                    {
+                        string key = tokens[c];
+                        float w = (r == rows.Length - 1) ? 0.19f : 0.075f;
+                        GameObject keyObj = GameObject.CreatePrimitive(PrimitiveType.Cube);
+                        keyObj.transform.SetParent(kbRoot.transform, false);
+                        keyObj.transform.localPosition = new Vector3(startX + c * spacing, y, 0f);
+                        keyObj.transform.localScale = new Vector3(w, 0.075f, 0.02f);
+                        var rend = keyObj.GetComponent<Renderer>();
+                        if (rend != null)
+                        {
+                            if (key == "SAVE") rend.material.color = new Color(0.15f, 0.65f, 0.2f, 1f);
+                            else if (key == "CANCEL") rend.material.color = new Color(0.75f, 0.15f, 0.15f, 1f);
+                            else rend.material.color = new Color(0.25f, 0.25f, 0.28f, 1f);
+                        }
+                        CreateKeyboardLabel(keyObj.transform, key, 0.025f);
+                        kbKeys.Add((keyObj, key));
+                    }
+                }
+
+                GameObject rayObj = new GameObject("QuestMods_KBRay");
+                rayObj.transform.SetParent(kbRoot.transform, false);
+                kbRay = rayObj.AddComponent<LineRenderer>();
+                kbRay.positionCount = 2;
+                kbRay.startWidth = 0.005f;
+                kbRay.endWidth = 0.002f;
+                kbRay.material = new Material(Shader.Find("Sprites/Default"));
+                kbRay.startColor = Color.red;
+                kbRay.endColor = Color.yellow;
+            }
+            catch (Exception ex) { MelonLogger.Warning("[QuestMods] OpenWaypointKeyboard failed: " + ex.Message); }
+        }
+
+        private static Component CreateKeyboardLabel(Transform parent, string text, float charSize)
+        {
+            EnsureTextMeshReflection();
+            if (textMeshType == null) return null;
+            GameObject lbl = new GameObject("Label");
+            lbl.transform.SetParent(parent, false);
+            lbl.transform.localPosition = new Vector3(0f, 0f, -0.7f);
+            lbl.transform.localScale = new Vector3(1f / parent.localScale.x, 1f / parent.localScale.y, 1f);
+            Component tm = lbl.AddComponent(Il2CppType.From(textMeshType));
+            object typed = typeof(Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase).GetMethod("TryCast", BindingFlags.Instance | BindingFlags.Public)?.MakeGenericMethod(textMeshType).Invoke(tm, null);
+            if (typed != null)
+            {
+                tmTextProp?.SetValue(typed, text);
+                tmCharSizeProp?.SetValue(typed, charSize * 1.6f);
+                tmColorProp?.SetValue(typed, Color.white);
+                tmAnchorProp?.SetValue(typed, 4);
+                tmAlignProp?.SetValue(typed, 1);
+            }
+            return tm;
+        }
+
+        private static bool lastMakePearlPref;
+        private static Pickup pearlPickup;
+        private static bool pearlWasHeld;
+        private static float pearlReleaseTime;
+
+        private static void TickMakePearl()
+        {
+            if (prefMakePearl == null) return;
+            if (prefMakePearl.Value != lastMakePearlPref)
+            {
+                lastMakePearlPref = prefMakePearl.Value;
+                pearlWasHeld = false;
+                if (lastMakePearlPref)
+                {
+                    var pc = PlayerController.Current;
+                    var held = pc?.RightController?.Interactor?.InteractingWith ?? pc?.LeftController?.Interactor?.InteractingWith;
+                    pearlPickup = held != null ? held.TryCast<Pickup>() : null;
+                    if (pearlPickup != null)
+                        MelonLogger.Msg("[QuestMods] Make Pearl: tracking '" + pearlPickup.name + "'.");
+                    else
+                        MelonLogger.Warning("[QuestMods] Make Pearl: hold an item when toggling ON!");
+                }
+                else
+                {
+                    pearlPickup = null;
+                }
+            }
+
+            if (!lastMakePearlPref || pearlPickup == null) return;
+            try
+            {
+                var pc = PlayerController.Current;
+                if (pc == null) return;
+                bool isHeld =
+                    (pc.RightController?.Interactor?.IsInteracting == true && pc.RightController.Interactor.InteractingWith?.Pointer == pearlPickup.Pointer) ||
+                    (pc.LeftController?.Interactor?.IsInteracting == true && pc.LeftController.Interactor.InteractingWith?.Pointer == pearlPickup.Pointer);
+
+                if (isHeld)
+                {
+                    pearlWasHeld = true;
+                    pearlReleaseTime = Time.time;
+                }
+                else if (pearlWasHeld && Time.time - pearlReleaseTime > 0.25f)
+                {
+                    Rigidbody rb = pearlPickup.GetComponent<Rigidbody>();
+                    if (rb == null || rb.velocity.sqrMagnitude < 0.08f || Time.time - pearlReleaseTime > 4.0f)
+                    {
+                        pearlWasHeld = false;
+                        TeleportLocalPlayer(pearlPickup.transform.position + Vector3.up * 0.2f, "Ender Pearl");
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private static void CloseWaypointKeyboard()
+        {
+            kbKeys.Clear();
+            kbRay = null;
+            kbPreviewText = null;
+            if (kbRoot != null)
+            {
+                UnityEngine.Object.Destroy(kbRoot);
+                kbRoot = null;
+            }
+        }
+
+        private static void UpdateWaypointKeyboard()
+        {
+            if (kbRoot == null) return;
+            try
+            {
+                var pc = PlayerController.Current;
+                var hand = pc?.RightController?.transform;
+                if (hand == null) return;
+
+                Vector3 origin = hand.position;
+                Vector3 dir = hand.forward;
+                Vector3 end = origin + dir * 2.5f;
+
+                if (kbRay != null)
+                {
+                    kbRay.SetPosition(0, origin);
+                    kbRay.SetPosition(1, end);
+                }
+
+                if (Physics.Raycast(origin, dir, out RaycastHit hit, 3.0f))
+                {
+                    if (kbRay != null) kbRay.SetPosition(1, hit.point);
+                    bool pressed = OVRInput.GetDown(OVRInput.Button.PrimaryIndexTrigger, OVRInput.Controller.RTouch);
+                    if (pressed && hit.collider != null)
+                    {
+                        GameObject hitObj = hit.collider.gameObject;
+                        foreach (var k in kbKeys)
+                        {
+                            if (k.Obj != null && k.Obj.Pointer == hitObj.Pointer)
+                            {
+                                if (k.Key == "TP_CAVE")
+                                {
+                                    if (int.TryParse(kbTypedName.Trim(), out int caveLayer))
+                                        TeleportToCaveLayer(caveLayer);
+                                    CloseWaypointKeyboard();
+                                    return;
+                                }
+                                if (k.Key == "SAVE")
+                                {
+                                    SaveWaypointWithPos(kbTypedName, kbPendingPos);
+                                    CloseWaypointKeyboard();
+                                    return;
+                                }
+                                if (k.Key == "CANCEL")
+                                {
+                                    CloseWaypointKeyboard();
+                                    return;
+                                }
+                                if (k.Key == "BACK")
+                                {
+                                    if (kbTypedName.Length > 0) kbTypedName = kbTypedName.Substring(0, kbTypedName.Length - 1);
+                                }
+                                else if (k.Key == "SPACE")
+                                {
+                                    kbTypedName += " ";
+                                }
+                                else
+                                {
+                                    kbTypedName += k.Key;
+                                }
+                                if (kbPreviewText != null && textMeshType != null)
+                                {
+                                    object typed = typeof(Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase).GetMethod("TryCast", BindingFlags.Instance | BindingFlags.Public)?.MakeGenericMethod(textMeshType).Invoke(kbPreviewText, null);
+                                    if (typed != null) tmTextProp?.SetValue(typed, "Name: " + kbTypedName + "_");
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private static Page BuildCustomTPsPage()
+        {
+            Page page = new Page("SAVED TPS", "Custom Waypoints");
+            try
+            {
+                page.Button("Save Pos", () => OpenWaypointKeyboard());
+                page.Button("TP 0,0,0", () => TeleportLocalPlayer(Vector3.zero, "0,0,0"));
+
+                var waypoints = LoadWaypoints();
+                for (int i = 0; i < waypoints.Count; i++)
+                {
+                    int wpIndex = i;
+                    var wp = waypoints[i];
+                    page.Button("TP: " + wp.Name, () => TeleportLocalPlayer(wp.Pos, wp.Name));
+                    page.Button(pendingDeleteIndex == wpIndex ? "Are you sure? (" + wp.Name + ")" : "Del: " + wp.Name, () => DeleteWaypoint(wpIndex));
+                }
+            }
+            catch (Exception ex) { MelonLogger.Warning("[QuestMods] BuildCustomTPsPage failed: " + ex.Message); }
+            return page;
+        }
+
+        private static void OpenCaveNumPad()
+        {
+            try
+            {
+                CloseWaypointKeyboard();
+                var pc = PlayerController.Current;
+                if (pc == null) { MelonLogger.Warning("[QuestMods] Cave NumPad: local player not ready."); return; }
+                kbTypedName = "";
+
+                Transform cam = Camera.main != null ? Camera.main.transform : pc.transform;
+                Vector3 headPos = (Camera.main != null && Camera.main.transform.position.y > pc.PlayerFeetPosition.y + 0.3f) ? Camera.main.transform.position : (pc.PlayerFeetPosition + Vector3.up * 1.35f);
+                Vector3 fwd = cam.forward; fwd.y = 0f;
+                if (fwd.sqrMagnitude < 0.001f) fwd = Vector3.forward;
+                fwd.Normalize();
+
+                kbRoot = new GameObject("QuestMods_CaveNumPad");
+                kbRoot.transform.position = headPos + fwd * 0.85f;
+                kbRoot.transform.rotation = Quaternion.LookRotation(fwd, Vector3.up);
+
+                GameObject prevObj = GameObject.CreatePrimitive(PrimitiveType.Cube);
+                prevObj.transform.SetParent(kbRoot.transform, false);
+                prevObj.transform.localPosition = new Vector3(0f, 0.28f, 0f);
+                prevObj.transform.localScale = new Vector3(0.55f, 0.09f, 0.02f);
+                var prevRend = prevObj.GetComponent<Renderer>();
+                if (prevRend != null) prevRend.material.color = new Color(0.12f, 0.12f, 0.12f, 1f);
+                kbPreviewText = CreateKeyboardLabel(prevObj.transform, "Layer: _", 0.03f);
+
+                string[] rows = new[]
+                {
+                    "1 2 3",
+                    "4 5 6",
+                    "7 8 9",
+                    "BACK 0 TP_CAVE",
+                    "CANCEL"
+                };
+
+                for (int r = 0; r < rows.Length; r++)
+                {
+                    string[] tokens = rows[r].Split(' ');
+                    float spacing = 0.14f;
+                    float startX = -((tokens.Length - 1) * spacing) * 0.5f;
+                    float y = 0.16f - r * 0.105f;
+                    for (int c = 0; c < tokens.Length; c++)
+                    {
+                        string key = tokens[c];
+                        float w = (key.Length > 1) ? 0.13f : 0.10f;
+                        GameObject keyObj = GameObject.CreatePrimitive(PrimitiveType.Cube);
+                        keyObj.transform.SetParent(kbRoot.transform, false);
+                        keyObj.transform.localPosition = new Vector3(startX + c * spacing, y, 0f);
+                        keyObj.transform.localScale = new Vector3(w, 0.085f, 0.02f);
+                        var rend = keyObj.GetComponent<Renderer>();
+                        if (rend != null)
+                        {
+                            if (key == "TP_CAVE") rend.material.color = new Color(0.15f, 0.65f, 0.2f, 1f);
+                            else if (key == "CANCEL") rend.material.color = new Color(0.75f, 0.15f, 0.15f, 1f);
+                            else rend.material.color = new Color(0.25f, 0.25f, 0.28f, 1f);
+                        }
+                        CreateKeyboardLabel(keyObj.transform, key == "TP_CAVE" ? "TP" : key, 0.025f);
+                        kbKeys.Add((keyObj, key));
+                    }
+                }
+
+                GameObject rayObj = new GameObject("QuestMods_KBRay");
+                rayObj.transform.SetParent(kbRoot.transform, false);
+                kbRay = rayObj.AddComponent<LineRenderer>();
+                kbRay.positionCount = 2;
+                kbRay.startWidth = 0.005f;
+                kbRay.endWidth = 0.002f;
+                kbRay.material = new Material(Shader.Find("Sprites/Default"));
+                kbRay.startColor = Color.red;
+                kbRay.endColor = Color.yellow;
+            }
+            catch (Exception ex) { MelonLogger.Warning("[QuestMods] OpenCaveNumPad failed: " + ex.Message); }
+        }
+
+        private static void TeleportToCaveLayer(int layer)
+        {
+            try
+            {
+                Vector3 pos = Vector3.zero;
+                bool found = false;
+
+                var clm = Il2CppAlta.Caves.CaveLayerManager.Instance;
+                if (clm != null && clm.Layers != null && clm.Layers.TryGetValue(layer, out var caveLayer) && caveLayer != null)
+                {
+                    var mb = caveLayer.TryCast<MonoBehaviour>();
+                    if (mb != null && mb.transform != null)
+                    {
+                        pos = mb.transform.position;
+                        found = true;
+                    }
+                }
+
+                if (!found)
+                {
+                    foreach (var ct in UnityEngine.Object.FindObjectsOfType<Il2CppAlta.Caves.CaveTeleporter>())
+                    {
+                        if (ct == null) continue;
+                        var f = typeof(Il2CppAlta.Caves.CaveTeleporter).GetField("layer", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                        if (f != null && f.GetValue(ct) is int l && l == layer)
+                        {
+                            pos = ct.TeleportToTarget;
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!found)
+                {
+                    pos = Il2CppAlta.Caves.CaveTeleporterManager.GetTeleportPosition(layer);
+                }
+
+                StartCaveTeleportSequence(pos + Vector3.up * 0.2f, "Cave Layer " + layer, layer);
+            }
+            catch (Exception ex) { MelonLogger.Warning("[QuestMods] TeleportToCaveLayer failed: " + ex.Message); }
+        }
+
+        private static Page BuildCavesPage()
+        {
+            Page page = new Page("CAVES", "Cave Teleporter");
+            try
+            {
+                page.Button("Custom Layer (NumPad)", () => OpenCaveNumPad());
+
+                var layers = new SortedSet<int> { 0, 9, 19, 29, 39, 49, 59, 69, 79, 89, 99 };
+                var mgr = Il2CppAlta.Caves.CaveTeleporterManager.Instance;
+                if (mgr != null && mgr.AvailableLayers != null)
+                {
+                    foreach (var kv in mgr.AvailableLayers)
+                        layers.Add(kv.Key);
+                }
+
+                foreach (int layer in layers)
+                {
+                    int targetLayer = layer;
+                    string label = targetLayer == 0 ? "Layer 0 (Surface)" : ("Layer " + targetLayer);
+                    page.Button(label, () => TeleportToCaveLayer(targetLayer));
+                }
+            }
+            catch (Exception ex) { MelonLogger.Warning("[QuestMods] BuildCavesPage failed: " + ex.Message); }
+            return page;
+        }
+
+        private static Page BuildPlayerTPsPage()
+        {
+            Page page = new Page("PLAYER TPS", "Online Players");
+            try
+            {
+                var list = new List<(string Name, Vector3 Pos)>();
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var allPlayers = Player.AllPlayers;
+                if (allPlayers != null)
+                {
+                    IntPtr localPtr = Player.Current != null ? Player.Current.Pointer : IntPtr.Zero;
+                    foreach (var raw in allPlayers)
+                    {
+                        if (raw == null) continue;
+                        var il2 = raw as Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase;
+                        if (il2 == null || il2.Pointer == localPtr) continue;
+                        Player p = il2.TryCast<Player>();
+                        string uname = p?.UserInfo?.Username ?? p?.name ?? raw.ToString() ?? "Player";
+                        if (!seen.Add(uname)) continue;
+                        Vector3 pos = Vector3.zero;
+                        bool hasPos = false;
+                        if (p != null && p.PlayerController != null)
+                        {
+                            pos = p.PlayerController.PlayerFeetPosition + Vector3.up * 0.2f;
+                            hasPos = true;
+                        }
+                        else
+                        {
+                            PropertyInfo posProp = raw.GetType().GetProperty("Position", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                            if (posProp != null && posProp.GetValue(raw) is Vector3 v && v.sqrMagnitude > 0.01f)
+                            {
+                                pos = v + Vector3.up * 0.2f;
+                                hasPos = true;
+                            }
+                            else if (p != null && p.transform != null)
+                            {
+                                pos = p.transform.position + Vector3.up * 0.2f;
+                                hasPos = true;
+                            }
+                        }
+                        if (hasPos) list.Add((uname, pos));
+                    }
+                }
+                list.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
+                foreach (var entry in list)
+                {
+                    string targetName = entry.Name;
+                    Vector3 targetPos = entry.Pos;
+                    page.Button(targetName, () => TeleportLocalPlayer(targetPos, targetName));
+                }
+                MelonLogger.Msg("[QuestMods] Player TPs: listed " + list.Count + " online player(s).");
+            }
+            catch (Exception ex) { MelonLogger.Warning("[QuestMods] BuildPlayerTPsPage failed: " + ex.Message); }
+            return page;
+        }
+
+        private static void TeleportLocalPlayer(Vector3 pos, string targetName)
+        {
+            try
+            {
+                PlayerController pc = PlayerController.Current;
+                if (pc == null) { MelonLogger.Warning("[QuestMods] TP: PlayerController.Current is null."); return; }
+                SmoothLocomotionPlayerController slpc = pc.TryCast<SmoothLocomotionPlayerController>();
+                object loco = slpc != null ? (object)slpc.LocomotionController : pc.LocomotionController;
+                if (loco == null) { MelonLogger.Warning("[QuestMods] TP: LocomotionController not found."); return; }
+                foreach (MethodInfo m in loco.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+                {
+                    if (m.Name != "MoveTo") continue;
+                    ParameterInfo[] ps = m.GetParameters();
+                    if (ps.Length == 2 && ps[0].ParameterType == typeof(Vector3))
+                    {
+                        object arg2 = ps[1].ParameterType.IsEnum ? Enum.ToObject(ps[1].ParameterType, 0) : null;
+                        m.Invoke(loco, new object[] { pos, arg2 });
+                        MelonLogger.Msg("[QuestMods] Teleported to " + targetName + ".");
+                        return;
+                    }
+                    if (ps.Length == 1 && ps[0].ParameterType == typeof(Vector3))
+                    {
+                        m.Invoke(loco, new object[] { pos });
+                        MelonLogger.Msg("[QuestMods] Teleported to " + targetName + ".");
+                        return;
+                    }
+                }
+            }
+            catch (Exception ex) { MelonLogger.Warning("[QuestMods] TeleportLocalPlayer failed: " + ex.Message); }
+        }
+
+        private static void MakeDay()
+        {
+            try
+            {
+                DayTimeManager dtm = UnityEngine.Object.FindObjectOfType<DayTimeManager>();
+                if (dtm == null) { MelonLogger.Warning("[QuestMods] Make Day: no DayTimeManager found in scene."); return; }
+                Type type = typeof(DayTimeManager);
+                const BindingFlags flags = BindingFlags.NonPublic | BindingFlags.Instance;
+                type.GetField("isUpdatingDaytime", flags)?.SetValue(dtm, false);
+                type.GetMethod("UpdateRotation", flags)?.Invoke(dtm, new object[] { 0.25f, 0f });
+                type.GetMethod("UpdateAmbience", flags)?.Invoke(dtm, null);
+                MelonLogger.Msg("[QuestMods] Forced DayTimeManager to midday (client-side visual override only).");
+            }
+            catch (Exception ex) { MelonLogger.Warning("[QuestMods] MakeDay failed: " + ex.Message); }
+        }
+
+        // --- Air Grab ---
+        [ThreadStatic] private static int airGrabDepth;
+        private static Component airAnchorArmed;
+        private static readonly Dictionary<IntPtr, Component> airAnchors = new Dictionary<IntPtr, Component>();
+        private static Type physType, sphereColType;
+        private static MethodInfo overlapSphereMethod, syncTransformsMethod;
+        private static PropertyInfo colEnabledProp, sphereRadiusProp, colIsTriggerProp;
+
+        private static bool EnsurePhysicsReflection()
+        {
+            if (physType != null && sphereColType != null) return overlapSphereMethod != null;
+            foreach (Assembly a in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                if (physType == null) physType = a.GetType("UnityEngine.Physics", false);
+                if (sphereColType == null) sphereColType = a.GetType("UnityEngine.SphereCollider", false);
+                if (physType != null && sphereColType != null) break;
+            }
+            if (physType != null)
+            {
+                overlapSphereMethod = physType.GetMethod("OverlapSphere", new Type[] { typeof(Vector3), typeof(float), typeof(int) });
+                syncTransformsMethod = physType.GetMethod("SyncTransforms", Type.EmptyTypes);
+            }
+            if (sphereColType != null)
+            {
+                colEnabledProp = sphereColType.GetProperty("enabled");
+                sphereRadiusProp = sphereColType.GetProperty("radius");
+                colIsTriggerProp = sphereColType.GetProperty("isTrigger");
+            }
+            return overlapSphereMethod != null && sphereColType != null;
+        }
+
+        private static void CheckGrabPrefix(ClimbingHand __instance)
+        {
+            airGrabDepth++;
+            if (airGrabDepth != 1 || prefAirGrab == null || !prefAirGrab.Value || __instance == null) return;
+            try { PlaceAnchorIfNothingInReach(__instance); }
+            catch (Exception ex) { airAnchorArmed = null; MelonLogger.Warning("[QuestMods] AirGrab anchor failed: " + ex.Message); }
+        }
+
+        private static void CheckGrabPostfix(ClimbingHand __instance, bool __result)
+        {
+            airGrabDepth--;
+            if (airGrabDepth != 0 || airAnchorArmed == null) return;
+            try { colEnabledProp?.SetValue(airAnchorArmed, false); }
+            catch { }
+            finally { airAnchorArmed = null; }
+        }
+
+        private static void PlaceAnchorIfNothingInReach(ClimbingHand hand)
+        {
+            if (!EnsurePhysicsReflection()) return;
+            ClimbingHandler handler = hand.handler;
+            ClimbingSettings settings = handler == null ? null : handler.Settings;
+            Transform grip = hand.Controller == null ? null : hand.Controller.GripPoint;
+            if (settings == null || grip == null) return;
+
+            Vector3 pos = grip.position;
+            Vector3 back = -grip.forward;
+            Transform shoulder = hand.shoulder;
+            float hangDist = settings.HangDistance;
+            if (shoulder != null)
+            {
+                Vector3 diff = pos - shoulder.position;
+                float mag = diff.magnitude;
+                if (mag > 0.0001f)
+                {
+                    back = -diff / mag;
+                    if (mag > hangDist) pos = shoulder.position - back * hangDist;
+                }
+            }
+            int mask = handler.LayerMask.value;
+            object hitsObj = overlapSphereMethod.Invoke(null, new object[] { pos, settings.GrabRadius, mask });
+            if (hitsObj != null)
+            {
+                PropertyInfo lenProp = hitsObj.GetType().GetProperty("Length") ?? hitsObj.GetType().GetProperty("Count");
+                if (lenProp != null && Convert.ToInt32(lenProp.GetValue(hitsObj)) > 0) return;
+            }
+
+            Component anchor = GetAirAnchor(hand, LowestLayer(mask));
+            if (anchor == null) return;
+            sphereRadiusProp?.SetValue(anchor, 0.03f);
+            anchor.transform.position = pos + back * 0.05f;
+            colEnabledProp?.SetValue(anchor, true);
+            syncTransformsMethod?.Invoke(null, null);
+            airAnchorArmed = anchor;
+        }
+
+        private static Component GetAirAnchor(ClimbingHand hand, int layer)
+        {
+            if (airAnchors.TryGetValue(hand.Pointer, out Component col) && col != null && !col.WasCollected)
+                return col;
+            GameObject go = new GameObject("QuestMods air anchor");
+            UnityEngine.Object.DontDestroyOnLoad(go);
+            go.layer = layer;
+            col = go.AddComponent(Il2CppInterop.Runtime.Il2CppType.From(sphereColType));
+            if (col != null)
+            {
+                MethodInfo tryCast = typeof(Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase).GetMethod("TryCast", BindingFlags.Instance | BindingFlags.Public)?.MakeGenericMethod(sphereColType);
+                if (tryCast != null) col = tryCast.Invoke(col, null) as Component ?? col;
+            }
+            colIsTriggerProp?.SetValue(col, false);
+            colEnabledProp?.SetValue(col, false);
+            airAnchors[hand.Pointer] = col;
+            return col;
+        }
+
+        private static int LowestLayer(int mask)
+        {
+            for (int i = 0; i < 32; i++) if ((mask & (1 << i)) != 0) return i;
+            return 8;
+        }
+
+        // --- Any Connect ---
+        private static readonly Dictionary<IntPtr, float> anyConnectWidened = new Dictionary<IntPtr, float>();
+        private static readonly Dictionary<IntPtr, float> anyConnectForced = new Dictionary<IntPtr, float>();
+
+        private static void SupportsPostfix(JointSlot __instance, JointInsertType type, ref bool __result)
+        {
+            if (__result || type == null || prefAnyConnect == null || !prefAnyConnect.Value) return;
+            __result = true;
+            try { anyConnectWidened[__instance.Pointer] = Time.time; } catch { }
+        }
+
+        private static void AttemptCraftPostfix(CraftingPart __instance, JointSlot slot)
+        {
+            if (prefAnyConnect == null || !prefAnyConnect.Value || __instance == null || slot == null) return;
+            try
+            {
+                if (NetworkSceneManager.IsServer) return;
+                if (!anyConnectWidened.TryGetValue(slot.Pointer, out float t) || Time.time - t > 10f) return;
+                if (slot.ConnectedPart != null || slot.IsPreConfirmationConnected) return;
+                if (__instance.Insert == null || __instance.Insert.ConnectedSlot != null) return;
+                if (__instance.Pickup != null && __instance.Pickup.IsCraftedChild) return;
+                if (anyConnectForced.TryGetValue(__instance.Pointer, out float ft) && Time.time - ft < 15f) return;
+                if (WouldLoop(__instance, slot)) return;
+                anyConnectForced[__instance.Pointer] = Time.time;
+                __instance.CraftWithSlot(slot, true);
+            }
+            catch { }
+        }
+
+        private static bool TryConnectPrefix(JointSlot __instance, CraftingPart insertPart, ref bool __result)
+        {
+            try
+            {
+                if (__instance != null && insertPart != null && WouldLoop(insertPart, __instance))
+                {
+                    __result = false;
+                    return false;
+                }
+            }
+            catch { }
+            return true;
+        }
+
+        private static bool CraftWithSlotPrefix(CraftingPart __instance, JointSlot slot)
+        {
+            try { if (__instance != null && slot != null && WouldLoop(__instance, slot)) return false; } catch { }
+            return true;
+        }
+
+        private static bool WouldLoop(CraftingPart part, JointSlot slot)
+        {
+            CraftingPart cur = slot.CraftingPart;
+            int n = 0;
+            while (cur != null && n < 64)
+            {
+                if (cur.Pointer == part.Pointer) return true;
+                CraftingPart next = cur.ConnectedTo;
+                if (next == null || next.Pointer == cur.Pointer) return false;
+                cur = next;
+                n++;
+            }
+            return cur != null;
+        }
+
+        // --- Auto Revive ---
+        private static float nextReviveScanAt, nextReviveGrabAt;
+        private static Interactor reviveRightHand;
+        private static readonly List<ReviveOrb> myReviveOrbs = new List<ReviveOrb>();
+
+        private static void AutoReviveUpdate()
+        {
+            try
+            {
+                PlayerController me = PlayerController.Current;
+                if (me == null || !me.IsDowned) return;
+                float now = Time.time;
+                if (now >= nextReviveScanAt)
+                {
+                    nextReviveScanAt = now + 0.5f;
+                    myReviveOrbs.Clear();
+                    Player p = Player.Current == null ? null : Player.Current.TryCast<Player>();
+                    int myId = (p != null && p.UserInfo != null) ? p.UserInfo.Identifier : 0;
+                    if (myId != 0)
+                    {
+                        foreach (UnityEngine.Object obj in UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.Of<ReviveOrb>()))
+                        {
+                            ReviveOrb orb = obj.TryCast<ReviveOrb>();
+                            if (orb == null || orb.Entity == null || orb.Entity.IsBeingDestroyed) continue;
+                            IPlayer dp = orb.downedPlayer;
+                            if (dp != null && dp.UserInfo != null && dp.UserInfo.Identifier == myId && (orb.orbPickup == null || !orb.orbPickup.IsInteractedWith))
+                                myReviveOrbs.Add(orb);
+                        }
+                    }
+                }
+                if (myReviveOrbs.Count == 0 || now < nextReviveGrabAt) return;
+                if (reviveRightHand == null || reviveRightHand.WasCollected || !reviveRightHand.isActiveAndEnabled)
+                {
+                    reviveRightHand = null;
+                    foreach (Interactor inter in me.GetComponentsInChildren<Interactor>())
+                    {
+                        Controller c = inter == null ? null : inter.Controller;
+                        if (c != null && c.Hand != null && inter.IsLocal && c.Hand.HandIndex == HandIndex.Right)
+                        {
+                            reviveRightHand = inter;
+                            break;
+                        }
+                    }
+                }
+                if (reviveRightHand == null || reviveRightHand.IsInteracting) return;
+                ReviveOrb targetOrb = myReviveOrbs[0];
+                Pickup pickup = targetOrb.orbPickup;
+                if (pickup == null) return;
+                targetOrb.SetIsOrbInteractable(true);
+                nextReviveGrabAt = now + 1f;
+                reviveRightHand.OnStartInteractionAttempt();
+                reviveRightHand.StartInteract(pickup, false, false, false);
+            }
+            catch { }
         }
 
         private void PatchInitializers()
@@ -118,7 +1555,7 @@ namespace QuestMods
 
         public override void OnUpdate()
         {
-            try { TabletProbe.Tick(); DevWheelBridge.Tick(); DebugStateMonitor.Tick(); GrabbyHands.Tick(); }
+            try { TabletProbe.Tick(); DevWheelBridge.Tick(); DebugStateMonitor.Tick(); GrabbyHands.Tick(); SyncTabletToggles(); }
             catch (Exception ex) { LoggerInstance.Warning("Tablet probe tick: " + ex.Message); }
             if (reports >= 12 || DateTime.UtcNow < nextReport) return;
             reports++;
@@ -987,6 +2424,22 @@ namespace QuestMods
         [ThreadStatic] private static bool insideFallback;
         private static global::HarmonyLib.Harmony grabHarmony;
         public static bool Available => ready;
+        public static bool IsEnabled => enabled;
+        public static void SetEnabled(bool value)
+        {
+            if (value == enabled) return;
+            if (value && !grabScanDone) InstallGrabHooks();
+            if (value && holdHooks == 0)
+            {
+                enabled = false;
+                MelonLogger.Warning("[GrabbyHands] No compatible slot input hook; remains OFF.");
+                return;
+            }
+            enabled = value;
+            if (enabled) { earlyLogs = 0; startLogs = 0; holdLogs = 0; ownershipLogs = 0; pickupLogs = 0; seen = 0; }
+            MelonLogger.Msg("[GrabbyHands] " + (enabled ? "ON" : "OFF") + ".");
+            UpdateLabels();
+        }
 
         public static void Install(global::HarmonyLib.Harmony harmony)
         {
@@ -1081,6 +2534,39 @@ namespace QuestMods
                     }
                 }
                 catch (Exception ex) { MelonLogger.Warning("[GrabbyHands] Slot input hook failed: " + Detail(ex)); }
+                try
+                {
+                    MethodInfo getConf = AccessTools.Method(typeof(Interactor), "GetConfirmationOnInteractable", null, null);
+                    if (getConf != null)
+                    {
+                        grabHarmony.Patch(getConf, prefix: new HarmonyMethod(typeof(GrabbyHands).GetMethod(nameof(BeforeGetConfirmation), S)));
+                        MelonLogger.Msg("[GrabbyHands] Patched Interactor.GetConfirmationOnInteractable for hand snatching.");
+                    }
+                    else MelonLogger.Warning("[GrabbyHands] Interactor.GetConfirmationOnInteractable not found.");
+                }
+                catch (Exception ex) { MelonLogger.Warning("[GrabbyHands] Hand snatch hook failed: " + Detail(ex)); }
+                try
+                {
+                    MethodInfo dockCheck = AccessTools.Method(typeof(PickupDock), "CheckForward", null, null);
+                    if (dockCheck != null)
+                    {
+                        grabHarmony.Patch(dockCheck, prefix: new HarmonyMethod(typeof(GrabbyHands).GetMethod(nameof(BeforeDockCheckForward), S)));
+                        MelonLogger.Msg("[GrabbyHands] Patched PickupDock.CheckForward for hotbar/dock grabbing.");
+                    }
+                    else MelonLogger.Warning("[GrabbyHands] PickupDock.CheckForward not found.");
+                }
+                catch (Exception ex) { MelonLogger.Warning("[GrabbyHands] PickupDock.CheckForward hook failed: " + Detail(ex)); }
+                try
+                {
+                    MethodInfo docksFilter = AccessTools.Method(typeof(PlayerDocks), "Filter", null, null);
+                    if (docksFilter != null)
+                    {
+                        grabHarmony.Patch(docksFilter, prefix: new HarmonyMethod(typeof(GrabbyHands).GetMethod(nameof(BeforePlayerDocksFilter), S)));
+                        MelonLogger.Msg("[GrabbyHands] Patched PlayerDocks.Filter for hotbar/dock grabbing.");
+                    }
+                    else MelonLogger.Warning("[GrabbyHands] PlayerDocks.Filter not found.");
+                }
+                catch (Exception ex) { MelonLogger.Warning("[GrabbyHands] PlayerDocks.Filter hook failed: " + Detail(ex)); }
                 MelonLogger.Msg("[GrabbyHands] StartInteract hook(s)=" + grabHooks + "; default OFF.");
             }
             catch (Exception ex) { MelonLogger.Warning("[GrabbyHands] Interaction scan failed: " + Detail(ex)); }
@@ -1232,6 +2718,89 @@ namespace QuestMods
         // its own docked Pickup. Other nearby interactables are not guessed.
         // It asks the GAME to confirm/forward/interact: Pickup.Interact is
         // responsible for Undock(interactor, true, 1). Never pre-undock a slot.
+        private static int snatches, filterBypasses, remoteGrabChecks, docksReleased;
+
+        private static bool BeforeGetConfirmation(Interactor __instance, Interactable targetInteractable)
+        {
+            if (!enabled) return true;
+            Interactable interactable = targetInteractable;
+            try
+            {
+                if (targetInteractable.Entity != null && targetInteractable.Entity.Identifier != 0U)
+                {
+                    Interactable prev = null;
+                    int num = 0;
+                    bool flag = false;
+                    while (!flag && interactable != prev && num < 100)
+                    {
+                        num++;
+                        prev = interactable;
+                        interactable = interactable.CheckForward(__instance, out flag);
+                        if (interactable == null) return false;
+                    }
+                    PickupContainer pickupContainer = interactable.TryCast<PickupContainer>();
+                    if (pickupContainer != null && pickupContainer.Pickup != null)
+                        interactable = pickupContainer.Pickup;
+                }
+            }
+            catch (Exception ex)
+            {
+                if (holdLogs++ < 100) MelonLogger.Warning("[GrabbyHands] Hand snatch forward walk: " + ex.Message);
+            }
+            try
+            {
+                PlayerController holder = interactable.IsInteractedWith ? interactable.LastPlayerInteractor : null;
+                if (holder != null && !holder.IsLocalPlayer && snatches++ == 0)
+                    MelonLogger.Msg("[GrabbyHands] Hand snatch: first grab of an item another player is holding.");
+                __instance.StartInteract(targetInteractable, false, false, false);
+            }
+            catch (Exception ex2)
+            {
+                if (holdLogs++ < 100) MelonLogger.Warning("[GrabbyHands] Hand snatch: " + ex2.Message);
+            }
+            return false;
+        }
+
+        private static void BeforeDockCheckForward(PickupDock __instance)
+        {
+            if (!enabled) return;
+            try
+            {
+                PlayerController playerController = __instance.PlayerController;
+                if (playerController == null || playerController.IsLocalPlayer) return;
+                if (remoteGrabChecks++ == 0)
+                    MelonLogger.Msg("[GrabbyHands] Hotbar ownership: first grab check on another player's dock.");
+                if (__instance.IsOwnedByPlayer)
+                {
+                    __instance.IsOwnedByPlayer = false;
+                    if (!__instance.IsOwnedByPlayer) docksReleased++;
+                    else if (ownershipLogs++ < 8) MelonLogger.Warning("[GrabbyHands] Hotbar ownership: write to IsOwnedByPlayer did not take.");
+                }
+            }
+            catch (Exception ex)
+            {
+                if (ownershipLogs++ < 8) MelonLogger.Warning("[GrabbyHands] Hotbar ownership: " + ex.Message);
+            }
+        }
+
+        private static bool BeforePlayerDocksFilter(PlayerDocks __instance)
+        {
+            if (!enabled) return true;
+            try
+            {
+                PlayerController owner = __instance.owner;
+                if (owner == null || owner.IsLocalPlayer) return true;
+                if (filterBypasses++ == 0)
+                    MelonLogger.Msg("[GrabbyHands] Hotbar ownership: first owner filter bypassed on another player's dock.");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                if (ownershipLogs++ < 8) MelonLogger.Warning("[GrabbyHands] Hotbar ownership filter: " + ex.Message);
+                return true;
+            }
+        }
+
         public static bool BeforeCheckHold(object __instance)
         {
             if (!enabled || insideFallback || __instance == null) return true;
