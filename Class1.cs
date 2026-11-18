@@ -486,6 +486,7 @@ namespace QuestMods
             float duration = diff >= 25 ? 15f : (diff >= 15 ? 5f : 3f);
 
             caveTpPrevFly = prefFly != null && prefFly.Value;
+            caveTpFlyRestoreTime = -1f;
             if (prefFly != null) prefFly.Value = true;
 
             caveTpTargetPos = pos;
@@ -531,11 +532,17 @@ namespace QuestMods
             }
             var sl = UnityEngine.Object.FindObjectOfType<SmoothLocomotion>();
             if (sl != null) sl.enabled = true;
-            if (prefFly != null) prefFly.Value = caveTpPrevFly;
+            caveTpFlyRestoreTime = Time.time + 60f;
         }
 
         private static void TickCaveTeleport()
         {
+            if (caveTpFlyRestoreTime > 0f && Time.time >= caveTpFlyRestoreTime)
+            {
+                caveTpFlyRestoreTime = -1f;
+                if (prefFly != null) prefFly.Value = caveTpPrevFly;
+            }
+
             if (caveTpEndTime < 0f) return;
 
             if (caveRenderLabelObj != null && Camera.main != null)
