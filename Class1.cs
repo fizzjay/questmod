@@ -477,6 +477,7 @@ namespace QuestMods
 
         private static int caveTpTargetLayer = -1;
         private static bool caveTpPrevFly = false;
+        private static float caveTpFlyRestoreTime = -1f;
 
         private static void StartCaveTeleportSequence(Vector3 pos, string label, int targetLayer)
         {
