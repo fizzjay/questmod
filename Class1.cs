@@ -125,7 +125,24 @@ namespace QuestMods
                 .Toggle("Show Durability", prefDurability)
                 .Toggle("No Social", prefNoSocial)
                 .Toggle("Dev Light", prefDevLight)
-                .Toggle("Make Pearl", prefMakePearl);
+                .Toggle("Make Pearl", prefMakePearl)
+                .Button("Bag Looking", () => ToggleStorage());
+        }
+
+        public static void ToggleStorage()
+        {
+            GameObject[] array = UnityEngine.Object.FindObjectsOfType<GameObject>();
+            foreach (GameObject gameObject in array)
+            {
+                if (gameObject.name.EndsWith("Bag(Clone)"))
+                {
+                    Transform transform = gameObject.transform.Find("Storage");
+                    if (transform != null)
+                    {
+                        transform.gameObject.SetActive(!transform.gameObject.activeSelf);
+                    }
+                }
+            }
         }
 
         private static void SyncTabletToggles()
@@ -458,11 +475,18 @@ namespace QuestMods
         private static GameObject caveRenderLabelObj;
         private static Component caveRenderLabelTm;
 
+        private static int caveTpTargetLayer = -1;
+        private static bool caveTpPrevFly = false;
+
         private static void StartCaveTeleportSequence(Vector3 pos, string label, int targetLayer)
         {
             int diff = Math.Abs(targetLayer - currentCaveLayer);
             currentCaveLayer = targetLayer;
-            float duration = diff >= 25 ? 45f : (diff >= 15 ? 30f : 3f);
+            caveTpTargetLayer = targetLayer;
+            float duration = diff >= 25 ? 15f : (diff >= 15 ? 5f : 3f);
+
+            caveTpPrevFly = prefFly != null && prefFly.Value;
+            if (prefFly != null) prefFly.Value = true;
 
             caveTpTargetPos = pos;
             caveTpLabel = label;
@@ -473,7 +497,7 @@ namespace QuestMods
             var sl = UnityEngine.Object.FindObjectOfType<SmoothLocomotion>();
             if (sl != null) sl.enabled = false;
 
-            if (duration >= 30f)
+            if (duration >= 5f)
             {
                 EnsureTextMeshReflection();
                 if (caveRenderLabelObj != null) UnityEngine.Object.Destroy(caveRenderLabelObj);
@@ -495,6 +519,21 @@ namespace QuestMods
             TeleportLocalPlayer(pos, label);
         }
 
+        private static void StopCaveTeleportSequence()
+        {
+            caveTpEndTime = -1f;
+            caveTpTargetLayer = -1;
+            if (caveRenderLabelObj != null)
+            {
+                UnityEngine.Object.Destroy(caveRenderLabelObj);
+                caveRenderLabelObj = null;
+                caveRenderLabelTm = null;
+            }
+            var sl = UnityEngine.Object.FindObjectOfType<SmoothLocomotion>();
+            if (sl != null) sl.enabled = true;
+            if (prefFly != null) prefFly.Value = caveTpPrevFly;
+        }
+
         private static void TickCaveTeleport()
         {
             if (caveTpEndTime < 0f) return;
@@ -514,15 +553,7 @@ namespace QuestMods
 
             if (Time.time >= caveTpEndTime)
             {
-                caveTpEndTime = -1f;
-                if (caveRenderLabelObj != null)
-                {
-                    UnityEngine.Object.Destroy(caveRenderLabelObj);
-                    caveRenderLabelObj = null;
-                    caveRenderLabelTm = null;
-                }
-                var sl = UnityEngine.Object.FindObjectOfType<SmoothLocomotion>();
-                if (sl != null) sl.enabled = true;
+                StopCaveTeleportSequence();
                 return;
             }
 
@@ -1131,11 +1162,20 @@ namespace QuestMods
                         layers.Add(kv.Key);
                 }
 
+                if (caveTpEndTime > Time.time && caveTpTargetLayer >= 0 && !layers.Contains(caveTpTargetLayer))
+                {
+                    page.Button("End Render (Layer " + caveTpTargetLayer + ")", () => StopCaveTeleportSequence());
+                }
+
                 foreach (int layer in layers)
                 {
                     int targetLayer = layer;
                     string label = targetLayer == 0 ? "Layer 0 (Surface)" : ("Layer " + targetLayer);
                     page.Button(label, () => TeleportToCaveLayer(targetLayer));
+                    if (caveTpEndTime > Time.time && caveTpTargetLayer == targetLayer)
+                    {
+                        page.Button("End Render", () => StopCaveTeleportSequence());
+                    }
                 }
             }
             catch (Exception ex) { MelonLogger.Warning("[QuestMods] BuildCavesPage failed: " + ex.Message); }
