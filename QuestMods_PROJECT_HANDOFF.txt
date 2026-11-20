@@ -2,6 +2,7 @@ QUESTMODS PROJECT HANDOFF
 ========================
 Prepared from the project conversation and the source files available in the workspace.
 Date: 2026-11-04
+Updated: 2026-11-20 (wrist HUD added in 1.9.7; see section below)
 
 PURPOSE OF THIS FILE
 --------------------
@@ -9,15 +10,30 @@ This is a handoff for a developer or future AI assistant working on this project
 
 CURRENT STATUS — READ THIS FIRST
 --------------------------------
-Latest source: Questmods_1.9.6.cs
+Latest source: Class1.cs (QuestMods 1.9.7, includes the wrist HUD described below).
 Latest version actually tested by the user: Questmods_1.9.5.cs
 Status of 1.9.6: produced and statically checked for balanced delimiters only. It has NOT been compiled by the assistant or tested on the Quest. Do not describe it as verified or working on all slots.
+Status of 1.9.7: adds the wrist FPS / SAFE / NOT SAFE display. It has NOT been compiled with the user's Quest references and has NOT been tested on the Quest. Only balanced-delimiter and C# syntax-parser checks were available here. All Grabby Hands caveats from 1.9.6 still apply.
 
 The user reported that 1.9.5 worked on some slots, but not all. Its log confirms the fallback was invoked on some StockDock targets, but the observed line said Interacting=True and the original referenced pickup still had IsDocked=True. That line alone does NOT prove that pickup was undocked, that a particular item was grabbed, or that any change persisted server-side. The user's report of partial success is valid, but cannot be assigned to a particular logged line without additional evidence.
 
 Version 1.9.6 attempts to address two observed limitations: the game's ten-collider overlap buffer can fill, and a dock plus its own pickup can appear as two different overlapping interactables. It also logs the object actually held after confirmation. Multiple unrelated targets still result in a safe refusal to guess. Some slots may have no collider overlap, use other types, be blocked by native checks, or be server-authoritative.
 
 Important: versions prior to 1.9.4 attempted to undock before the normal grab. The user's later reference source showed that pre-undocking can interfere with PickupDock.CheckForward and dock-specific grab behavior. Do not reintroduce it blindly. Versions 1.9.4–1.9.6 use the game's confirmation/forwarding/interaction path and let the native Pickup.Interact handle Undock where appropriate. This is a deliberate change from the user's initial Undock-before-StartInteract example, not proof every slot will work.
+
+WRIST HUD ADDED IN 1.9.7 (UNTESTED ON QUEST)
+--------------------------------------------
+User request: "on my wrist it has my fps and safe or Not Safe ... check if people are around you and can see you ... if nobodys around you it says safe."
+
+Implementation in Class1.cs (inside QuestMods.Mod):
+- A small 3D TextMesh panel follows the local player's LEFT wrist (falls back to the right controller). It is created with the same reflection-based TextMesh helper already used for durability/keyboard labels; a dark quad sits behind it and its collider is destroyed so it cannot interfere with grabs or sight rays.
+- Line 1 shows FPS, sampled from Time.frameCount over 0.5s. Lines 2/3 show "SAFE" (green) / "NOT SAFE" (red) / "SCANNING" (yellow) and a short count such as "N:2 VIS:1" or "CLEAR 30m".
+- Safety scan runs 4x/second over Player.AllPlayers, skipping the local player by pointer and by PlayerController identity. A player counts as "nearby" within the configured range (default 30m; tablet button cycles 10/20/30/50/80m). "Can see you" means an UNBLOCKED line of sight between your head and theirs: Physics.Raycast is stepped past player bodies, held items, triggers and our own HUD props; solid world geometry (walls/terrain/props) means they cannot see you. No view-cone guess is made because remote head/gaze transforms are not verified on this IL2CPP build; a nearby player with clear LOS is conservatively NOT SAFE even if facing away.
+- Fail-closed: if the player list cannot be read, the display says SCANNING; if a listed player's position cannot be read or the scan throws, it says NOT SAFE (count "?:N") rather than claiming SAFE.
+- Tablet UI: new "Wrist HUD (FPS/Safe)" toggle (defaults ON and is NOT force-reset on launch, unlike the gameplay toggles) and a "Safe Range: Nm" button. The radial wheel is untouched; Dev Tools 1/2 and the direct Grabby Hands toggle are preserved.
+- Everything is read-only and client-side. It does not hide you from other players, change networking, or grant permissions.
+
+Things to verify on-device: that UnityEngine.TextMesh + Quad render correctly under IL2CPP, that the panel is readable and on the correct wrist, that Player.AllPlayers/PlayerFeetPosition are populated for remote players, and that the LOS raycasts do not hit unexpected colliders. If SAFE appears while another player is clearly watching, collect [WristHUD] lines; if it stays SCANNING, Player.AllPlayers is probably unavailable in that scene.
 
 PROJECT GOAL AND USER REQUIREMENTS
 ----------------------------------

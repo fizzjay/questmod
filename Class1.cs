@@ -1,4 +1,5 @@
-// QuestMods 1.9.6 - existing Questmods mod with experimental developer wheel bridge.
+// QuestMods 1.9.7 - existing Questmods mod with experimental developer wheel bridge + wrist HUD.
+// Wrist HUD: FPS plus SAFE / NOT SAFE based on nearby players and line of sight.
 // Experimental native 3D nested wheel, not a tablet or rectangular panel.
 using System;
 using System.Collections;
@@ -24,7 +25,7 @@ using MelonLoader.Utils;
 using TabletUILib;
 using UnityEngine;
 
-[assembly: MelonInfo(typeof(QuestMods.Mod), "QuestMods", "1.9.6", "you")]
+[assembly: MelonInfo(typeof(QuestMods.Mod), "QuestMods", "1.9.7", "you")]
 [assembly: MelonGame(null, null)]
 [assembly: MelonAdditionalDependencies("TabletUILib")]
 
@@ -38,7 +39,7 @@ namespace QuestMods
 
         public override void OnInitializeMelon()
         {
-            LoggerInstance.Msg("=== QuestMods 1.9.6: experimental Quest Mods wheel ===");
+            LoggerInstance.Msg("=== QuestMods 1.9.7: wheel + wrist FPS/safety HUD ===");
             PatchInitializers();
             GrabbyHands.Install(HarmonyInstance);
             PatchGetter(typeof(QuickAccessMenuAction), "IsDev", typeof(MenuDevPatch));
@@ -68,6 +69,7 @@ namespace QuestMods
         private static MelonPreferences_Entry<bool> prefDevLight;
         private static bool lastDevLightPref;
         private static MelonPreferences_Entry<bool> prefMakePearl;
+        private static MelonPreferences_Entry<bool> prefWristHud;
         private static bool lastGrabbyPref, lastSpeedPref, lastFlyPref, lastNoclipPref, lastDurabilityPref;
 
         private void InitTabletUI()
@@ -84,6 +86,9 @@ namespace QuestMods
             prefNoSocial = category.CreateEntry("NoSocial", false, "No Social");
             prefDevLight = category.CreateEntry("DevLight", false, "Dev Light");
             prefMakePearl = category.CreateEntry("MakePearl", false, "Make Pearl");
+            // Wrist HUD defaults ON; unlike the gameplay toggles above it is not
+            // force-reset on launch, so a player who turns it off stays off.
+            prefWristHud = category.CreateEntry("WristHUD", true, "Wrist HUD (FPS / Safe)");
 
             prefGrabbyHands.Value = false;
             prefSuperSpeed.Value = false;
@@ -126,6 +131,8 @@ namespace QuestMods
                 .Toggle("No Social", prefNoSocial)
                 .Toggle("Dev Light", prefDevLight)
                 .Toggle("Make Pearl", prefMakePearl)
+                .Toggle("Wrist HUD (FPS/Safe)", prefWristHud)
+                .Button("Safe Range: " + wristRange + "m", () => CycleWristRange())
                 .Button("Bag Looking", () => ToggleStorage());
         }
 
@@ -210,6 +217,10 @@ namespace QuestMods
             {
                 AutoReviveUpdate();
             }
+
+            // Wrist HUD is read-only: any failure here must not stop the other ticks.
+            try { TickWristHud(); }
+            catch (Exception ex) { MelonLogger.Warning("[WristHUD] tick failed: " + ex.Message); }
         }
 
         private static void ApplySuperSpeed(bool enabled)
@@ -663,6 +674,394 @@ namespace QuestMods
                 if (cam != null)
                     tm.transform.rotation = Quaternion.LookRotation(tm.transform.position - cam.transform.position);
             }
+        }
+
+        // --- Wrist HUD: FPS + SAFE / NOT SAFE --------------------------------
+        // A small 3D TextMesh that follows the local player's left wrist.
+        // SAFE  = no other player within wristRange can see your head
+        //         (no one around, or everyone nearby is behind solid cover).
+        // NOT SAFE = at least one nearby player has an unobstructed line of
+        //         sight, or a nearby player's position could not be read.
+        // This is client-side information only; it does not change gameplay.
+        private const float WristRefreshSeconds = 0.25f;
+        private static readonly int[] wristRanges = { 10, 20, 30, 50, 80 };
+        private static int wristRange = 30;
+        private static float wristFps;
+        private static int wristFpsLastFrame;
+        private static float wristFpsSampleTime = -1f;
+        private static float wristNextRefresh;
+        private static bool wristHudWarned;
+
+        private static GameObject wristRoot;
+        private static Component wristFpsTm, wristStatusTm, wristInfoTm;
+        private static object wristFpsTyped, wristStatusTyped, wristInfoTyped;
+        private static string wristFpsCache, wristStatusCache, wristInfoCache;
+        private static string wristLoggedStatus;
+
+        private struct WristScan
+        {
+            public bool Ready;      // player list was readable
+            public int Nearby;      // other players inside wristRange
+            public int Watchers;    // nearby players with a clear line of sight
+            public int Unknown;     // nearby entries whose position could not be read
+        }
+
+        private static void CycleWristRange()
+        {
+            int idx = Array.IndexOf(wristRanges, wristRange);
+            wristRange = wristRanges[(idx + 1) % wristRanges.Length];
+            wristNextRefresh = 0f;
+            MelonLogger.Msg("[WristHUD] Safe range set to " + wristRange + "m.");
+        }
+
+        public static void WristHudSceneLoaded()
+        {
+            ClearWristHud();
+            wristFps = 0f;
+            wristFpsSampleTime = -1f;
+            wristFpsLastFrame = 0;
+            wristNextRefresh = 0f;
+        }
+
+        private static void ClearWristHud()
+        {
+            if (wristRoot != null) UnityEngine.Object.Destroy(wristRoot);
+            wristRoot = null;
+            wristFpsTm = wristStatusTm = wristInfoTm = null;
+            wristFpsTyped = wristStatusTyped = wristInfoTyped = null;
+            wristFpsCache = wristStatusCache = wristInfoCache = null;
+            wristLoggedStatus = null;
+        }
+
+        private static void TickWristHud()
+        {
+            if (prefWristHud == null || !prefWristHud.Value) { ClearWristHud(); return; }
+            if (!EnsureWristHud()) return;
+
+            // Average FPS over half a second using Unity's frame counter.
+            float now = Time.realtimeSinceStartup;
+            if (wristFpsSampleTime < 0f)
+            {
+                wristFpsSampleTime = now;
+                wristFpsLastFrame = Time.frameCount;
+            }
+            else
+            {
+                float elapsed = now - wristFpsSampleTime;
+                if (elapsed >= 0.5f)
+                {
+                    wristFps = (Time.frameCount - wristFpsLastFrame) / elapsed;
+                    wristFpsSampleTime = now;
+                    wristFpsLastFrame = Time.frameCount;
+                }
+            }
+
+            FollowWristHud();
+            if (Time.time < wristNextRefresh) return;
+            wristNextRefresh = Time.time + WristRefreshSeconds;
+
+            WristScan scan = ScanWristSafety();
+            string fpsText = wristFps > 0f ? "FPS " + Mathf.RoundToInt(wristFps) : "FPS --";
+            string statusText;
+            Color statusColor;
+            string infoText;
+            if (!scan.Ready)
+            {
+                statusText = "SCANNING";
+                statusColor = new Color(1f, 0.85f, 0.2f);
+                infoText = "NO PLAYER DATA";
+            }
+            else if (scan.Watchers > 0 || scan.Unknown > 0)
+            {
+                statusText = "NOT SAFE";
+                statusColor = new Color(1f, 0.18f, 0.18f);
+                infoText = "N:" + scan.Nearby + " VIS:" + scan.Watchers + (scan.Unknown > 0 ? " ?:" + scan.Unknown : "");
+            }
+            else
+            {
+                statusText = "SAFE";
+                statusColor = new Color(0.25f, 1f, 0.3f);
+                infoText = scan.Nearby == 0 ? "CLEAR " + wristRange + "m" : "N:" + scan.Nearby + " HIDDEN";
+            }
+
+            if (wristLoggedStatus != statusText)
+            {
+                wristLoggedStatus = statusText;
+                MelonLogger.Msg("[WristHUD] " + statusText + " (near=" + scan.Nearby + " visible=" + scan.Watchers +
+                    " unknown=" + scan.Unknown + " range=" + wristRange + "m)");
+            }
+
+            ApplyWristLabel(wristFpsTm, wristFpsTyped, ref wristFpsCache, fpsText, Color.white);
+            ApplyWristLabel(wristStatusTm, wristStatusTyped, ref wristStatusCache, statusText, statusColor);
+            ApplyWristLabel(wristInfoTm, wristInfoTyped, ref wristInfoCache, infoText, new Color(0.72f, 0.75f, 0.8f));
+        }
+
+        private static bool EnsureWristHud()
+        {
+            if (wristRoot != null) return wristFpsTm != null && wristStatusTm != null;
+            if (!EnsureTextMeshReflection() || textMeshType == null)
+            {
+                if (!wristHudWarned) { wristHudWarned = true; MelonLogger.Warning("[WristHUD] TextMesh unavailable; wrist display disabled."); }
+                return false;
+            }
+            try
+            {
+                wristRoot = new GameObject("QuestMods_WristHUD");
+                GameObject plate = GameObject.CreatePrimitive(PrimitiveType.Quad);
+                plate.name = "QuestMods_WristPlate";
+                plate.transform.SetParent(wristRoot.transform, false);
+                plate.transform.localScale = new Vector3(0.17f, 0.095f, 1f);
+                Collider plateCol = plate.GetComponent<Collider>();
+                if (plateCol != null) UnityEngine.Object.Destroy(plateCol); // never block grabs or sight rays
+                Renderer plateRend = plate.GetComponent<Renderer>();
+                if (plateRend != null) plateRend.material.color = new Color(0.03f, 0.035f, 0.045f, 1f);
+
+                wristFpsTm = CreateWristText(new Vector3(0f, 0.027f, -0.002f), 0.012f, 48, out wristFpsTyped);
+                wristStatusTm = CreateWristText(new Vector3(0f, -0.002f, -0.002f), 0.015f, 48, out wristStatusTyped);
+                wristInfoTm = CreateWristText(new Vector3(0f, -0.031f, -0.002f), 0.008f, 32, out wristInfoTyped);
+                MelonLogger.Msg("[WristHUD] Created wrist display (FPS + SAFE/NOT SAFE, range " + wristRange + "m).");
+                return wristFpsTm != null && wristStatusTm != null;
+            }
+            catch (Exception ex)
+            {
+                ClearWristHud();
+                if (!wristHudWarned) { wristHudWarned = true; MelonLogger.Warning("[WristHUD] setup failed: " + ex.Message); }
+                return false;
+            }
+        }
+
+        private static Component CreateWristText(Vector3 localPos, float charSize, int fontSize, out object typed)
+        {
+            typed = null;
+            GameObject go = new GameObject("QuestMods_WristLabel");
+            go.transform.SetParent(wristRoot.transform, false);
+            go.transform.localPosition = localPos;
+            Component tm = go.AddComponent(Il2CppInterop.Runtime.Il2CppType.From(textMeshType));
+            if (tm == null) return null;
+            try
+            {
+                MethodInfo tryCast = typeof(Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase)
+                    .GetMethods(BindingFlags.Instance | BindingFlags.Public)
+                    .FirstOrDefault(m => m.Name == "TryCast" && m.IsGenericMethodDefinition && m.GetParameters().Length == 0);
+                typed = tryCast?.MakeGenericMethod(textMeshType).Invoke(tm, null);
+                object target = typed ?? tm;
+                tmTextProp?.SetValue(target, "");
+                tmCharSizeProp?.SetValue(target, charSize);
+                tmFontSizeProp?.SetValue(target, fontSize);
+                SetWristEnum(tmAnchorProp, target, 4); // MiddleCenter
+                SetWristEnum(tmAlignProp, target, 1);  // Center
+                tmColorProp?.SetValue(target, Color.white);
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning("[WristHUD] TextMesh setup: " + ex.Message);
+            }
+            return tm;
+        }
+
+        private static void SetWristEnum(PropertyInfo prop, object target, int value)
+        {
+            if (prop == null || target == null) return;
+            try { prop.SetValue(target, prop.PropertyType.IsEnum ? Enum.ToObject(prop.PropertyType, value) : value); }
+            catch { }
+        }
+
+        private static void ApplyWristLabel(Component tm, object typed, ref string cache, string text, Color color)
+        {
+            if (tm == null) return;
+            try
+            {
+                object target = typed ?? tm;
+                if (cache != text) { tmTextProp?.SetValue(target, text); cache = text; }
+                tmColorProp?.SetValue(target, color);
+            }
+            catch { }
+        }
+
+        private static void FollowWristHud()
+        {
+            if (wristRoot == null) return;
+            PlayerController pc = PlayerController.Current;
+            Transform hand = pc == null ? null
+                : (pc.LeftController != null ? pc.LeftController.transform
+                : (pc.RightController != null ? pc.RightController.transform : null));
+            if (hand == null)
+            {
+                if (wristRoot.activeSelf) wristRoot.SetActive(false);
+                return;
+            }
+            if (!wristRoot.activeSelf) wristRoot.SetActive(true);
+
+            Camera cam = Camera.main;
+            Vector3 pos = hand.position - hand.forward * 0.045f + hand.up * 0.045f;
+            Vector3 eye = cam != null ? cam.transform.position : pc.PlayerFeetPosition + Vector3.up * 1.35f;
+            Vector3 up = cam != null ? cam.transform.up : Vector3.up;
+            Vector3 away = pos - eye;
+            if (away.sqrMagnitude < 0.0001f) away = cam != null ? cam.transform.forward : Vector3.forward;
+            // TextMesh's readable face is -Z, so +Z points away from the head.
+            wristRoot.transform.position = pos;
+            wristRoot.transform.rotation = Quaternion.LookRotation(away, up);
+        }
+
+        private static WristScan ScanWristSafety()
+        {
+            WristScan scan = new WristScan();
+            PlayerController pc = PlayerController.Current;
+            if (pc == null) return scan;              // not in a world yet -> SCANNING
+            Vector3 myHead = LocalHeadPosition(pc);
+            var allPlayers = Player.AllPlayers;
+            if (allPlayers == null) return scan;     // never claim SAFE on unknown data
+
+            IntPtr localPtr = Player.Current != null ? Player.Current.Pointer : IntPtr.Zero;
+            float rangeSq = (float)wristRange * wristRange;
+            try
+            {
+                scan.Ready = true;
+                foreach (var raw in allPlayers)
+                {
+                    if (raw == null) continue;
+                    var il2 = raw as Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase;
+                    if (il2 == null || il2.Pointer == localPtr) continue;
+                    Player p = il2.TryCast<Player>();
+                    if (p == null) continue;
+                    PlayerController other = p.PlayerController;
+                    if (other == null || other.Pointer == pc.Pointer) continue; // this is us
+                    Vector3 feet;
+                    bool haveFeet = TryGetRemoteFeet(p, other, out feet);
+                    float farSq = (wristRange + 3f) * (wristRange + 3f);
+                    if (haveFeet && (feet - myHead).sqrMagnitude > farSq) continue; // definitely outside range
+                    Vector3 theirHead;
+                    if (!TryGetRemoteHead(other, feet, haveFeet, out theirHead)) { scan.Unknown++; continue; }
+                    Vector3 delta = theirHead - myHead;
+                    if (delta.sqrMagnitude > rangeSq) continue;                  // too far to matter
+                    scan.Nearby++;
+                    if (HasLineOfSight(myHead, theirHead, pc.transform, other.transform)) scan.Watchers++;
+                }
+            }
+            catch (Exception ex)
+            {
+                MelonLogger.Warning("[WristHUD] player scan failed: " + ex.Message);
+                scan.Ready = false;
+            }
+            return scan;
+        }
+
+        private static Vector3 LocalHeadPosition(PlayerController pc)
+        {
+            Camera cam = Camera.main;
+            if (cam != null && cam.transform.position.y > pc.PlayerFeetPosition.y + 0.3f)
+                return cam.transform.position;
+            return pc.PlayerFeetPosition + Vector3.up * 1.35f;
+        }
+
+        private static bool TryGetRemoteFeet(Player p, PlayerController other, out Vector3 feet)
+        {
+            feet = Vector3.zero;
+            try
+            {
+                feet = other.PlayerFeetPosition;
+                if (feet.sqrMagnitude > 0.0001f) return true;
+            }
+            catch { }
+            try
+            {
+                if (p.transform != null)
+                {
+                    feet = p.transform.position;
+                    return feet.sqrMagnitude > 0.0001f;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private static bool TryGetRemoteHead(PlayerController other, Vector3 feet, bool haveFeet, out Vector3 head)
+        {
+            head = Vector3.zero;
+            // A head/camera transform is preferred when available, but only if it
+            // is plausibly attached to this player (within 3m of their feet).
+            Transform gaze = FindHeadTransform(other);
+            if (gaze != null && (!haveFeet || (gaze.position - feet).sqrMagnitude < 9f))
+            {
+                head = gaze.position;
+                return true;
+            }
+            if (!haveFeet) return false;
+            head = feet + Vector3.up * 1.35f;
+            return true;
+        }
+
+        private static Transform FindHeadTransform(object controller)
+        {
+            if (controller == null) return null;
+            string[] names = { "Head", "head", "HeadTransform", "headTransform", "Camera",
+                               "camera", "CameraTransform", "ViewTransform", "HeadBone" };
+            Type t = controller.GetType();
+            foreach (string name in names)
+            {
+                try
+                {
+                    PropertyInfo prop = t.GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    FieldInfo field = prop == null ? t.GetField(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic) : null;
+                    object value = prop != null ? prop.GetValue(controller) : field?.GetValue(controller);
+                    Transform tr = AsTransform(value);
+                    if (tr != null) return tr;
+                }
+                catch { }
+            }
+            return null;
+        }
+
+        private static Transform AsTransform(object value)
+        {
+            if (value is Transform tr) return tr;
+            var il2 = value as Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase;
+            return il2?.TryCast<Transform>();
+        }
+
+        // True when a ray from your head to theirs is not blocked by the world.
+        // Player bodies, held items, triggers and our own HUD props are stepped
+        // over; a wall, terrain or prop between you means they cannot see you.
+        private static bool HasLineOfSight(Vector3 from, Vector3 to, Transform rootA, Transform rootB)
+        {
+            Vector3 delta = to - from;
+            float dist = delta.magnitude;
+            if (dist < 0.3f) return true;
+            Vector3 dir = delta / dist;
+            float remaining = dist - 0.25f; // stop short of their head capsule
+            Vector3 origin = from;
+            for (int i = 0; i < 12 && remaining > 0.02f; i++)
+            {
+                if (!Physics.Raycast(origin, dir, out RaycastHit hit, remaining)) return true;
+                Collider col = hit.collider;
+                Transform hitTransform = col != null ? col.transform : null;
+                bool ignorable = col == null || col.isTrigger
+                    || BelongsToPlayer(hitTransform, rootA, rootB)
+                    || IsModObject(hitTransform);
+                if (!ignorable) return false;
+                float step = Mathf.Max(hit.distance + 0.08f, 0.08f);
+                origin += dir * step;
+                remaining -= step;
+            }
+            return true;
+        }
+
+        private static bool BelongsToPlayer(Transform t, Transform rootA, Transform rootB)
+        {
+            if (t == null) return false;
+            if (rootA != null && (t == rootA || t.IsChildOf(rootA))) return true;
+            if (rootB != null && (t == rootB || t.IsChildOf(rootB))) return true;
+            return false;
+        }
+
+        private static bool IsModObject(Transform t)
+        {
+            while (t != null)
+            {
+                if (t.name != null && t.name.StartsWith("QuestMods_")) return true;
+                t = t.parent;
+            }
+            return false;
         }
 
         private static void OpenPlayerTPs()
@@ -1596,6 +1995,7 @@ namespace QuestMods
         {
             DebugStateMonitor.SceneLoaded();
             GrabbyHands.SceneLoaded();
+            WristHudSceneLoaded();
             LoggerInstance.Msg($"Scene loaded: '{sceneName}' ({buildIndex}). {Counts()}");
             try { TabletProbe.SceneLoaded(buildIndex, sceneName); DevWheelBridge.SceneLoaded(); }
             catch (Exception ex) { LoggerInstance.Warning("Tablet probe scene event: " + ex.Message); }
