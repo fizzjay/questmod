@@ -1,4 +1,4 @@
-// QuestMods 1.9.9 - wheel + wrist HUD + sight guards + player ESP + graphics overhaul.
+// QuestMods 1.9.10 - wheel + wrist HUD + sight guards + player ESP + graphics overhaul.
 // Wrist HUD: FPS plus SAFE / NOT SAFE based on nearby players and line of sight.
 // Sight guards: Disconnect / Turn Off / TP Away on sight. ESP: through-wall player highlight.
 // Graphics Overhaul: no fog, no blue film, full-res textures, long draw distance.
@@ -27,7 +27,7 @@ using MelonLoader.Utils;
 using TabletUILib;
 using UnityEngine;
 
-[assembly: MelonInfo(typeof(QuestMods.Mod), "QuestMods", "1.9.9", "you")]
+[assembly: MelonInfo(typeof(QuestMods.Mod), "QuestMods", "1.9.10", "you")]
 [assembly: MelonGame(null, null)]
 [assembly: MelonAdditionalDependencies("TabletUILib")]
 
@@ -41,7 +41,7 @@ namespace QuestMods
 
         public override void OnInitializeMelon()
         {
-            LoggerInstance.Msg("=== QuestMods 1.9.9: wheel + wrist HUD + sight guards + ESP + graphics ===");
+            LoggerInstance.Msg("=== QuestMods 1.9.10: wheel + wrist HUD + sight guards + ESP + graphics ===");
             PatchInitializers();
             GrabbyHands.Install(HarmonyInstance);
             PatchGetter(typeof(QuickAccessMenuAction), "IsDev", typeof(MenuDevPatch));
@@ -574,7 +574,7 @@ namespace QuestMods
                 if (textMeshType != null)
                 {
                     caveRenderLabelObj = new GameObject("QuestMods_CaveRendering");
-                    caveRenderLabelTm = caveRenderLabelObj.AddComponent(Il2CppType.From(textMeshType));
+                    caveRenderLabelTm = caveRenderLabelObj.AddComponent(Il2CppInterop.Runtime.Il2CppType.From(textMeshType));
                     object typed = typeof(Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase).GetMethod("TryCast", BindingFlags.Instance | BindingFlags.Public)?.MakeGenericMethod(textMeshType).Invoke(caveRenderLabelTm, null);
                     if (typed != null)
                     {
@@ -1878,8 +1878,8 @@ namespace QuestMods
             // Distance-fog / mist particles that are geometry, not scripts.
             try
             {
-                foreach (ParticleSystemRenderer psr in UnityEngine.Object.FindObjectsOfType<ParticleSystemRenderer>())
-                    DisableGraphicsRenderer(psr);
+                foreach (Renderer r in UnityEngine.Object.FindObjectsOfType<Renderer>())
+                    DisableGraphicsRenderer(r);
             }
             catch (Exception ex) { MelonLogger.Warning("[Graphics] fog particles: " + ex.Message); }
         }
@@ -2149,7 +2149,7 @@ namespace QuestMods
             lbl.transform.SetParent(parent, false);
             lbl.transform.localPosition = new Vector3(0f, 0f, -0.7f);
             lbl.transform.localScale = new Vector3(1f / parent.localScale.x, 1f / parent.localScale.y, 1f);
-            Component tm = lbl.AddComponent(Il2CppType.From(textMeshType));
+            Component tm = lbl.AddComponent(Il2CppInterop.Runtime.Il2CppType.From(textMeshType));
             object typed = typeof(Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase).GetMethod("TryCast", BindingFlags.Instance | BindingFlags.Public)?.MakeGenericMethod(textMeshType).Invoke(tm, null);
             if (typed != null)
             {
@@ -2568,10 +2568,12 @@ namespace QuestMods
         {
             try
             {
-                DayTimeManager dtm = UnityEngine.Object.FindObjectOfType<DayTimeManager>();
+                Type dayType = FindLoadedType("DayTimeManager");
+                if (dayType == null) { MelonLogger.Warning("[QuestMods] Make Day: DayTimeManager type not loaded."); return; }
+                UnityEngine.Object dtm = UnityEngine.Object.FindObjectOfType(dayType);
                 if (dtm == null) { MelonLogger.Warning("[QuestMods] Make Day: no DayTimeManager found in scene."); return; }
-                Type type = typeof(DayTimeManager);
-                const BindingFlags flags = BindingFlags.NonPublic | BindingFlags.Instance;
+                Type type = dayType;
+                const BindingFlags flags = BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance;
                 type.GetField("isUpdatingDaytime", flags)?.SetValue(dtm, false);
                 type.GetMethod("UpdateRotation", flags)?.Invoke(dtm, new object[] { 0.25f, 0f });
                 type.GetMethod("UpdateAmbience", flags)?.Invoke(dtm, null);
@@ -3755,10 +3757,9 @@ namespace QuestMods
         private static readonly HashSet<int> localControllerIds = new HashSet<int>();
         private static readonly HashSet<int> localInteractorIds = new HashSet<int>();
         private static readonly List<Type> pickupTypes = new List<Type>();
-        private static int ownershipLogs, pickupLogs;
-        [ThreadStatic] private static bool insideUndock;
+        private static int ownershipLogs;
         private static bool ready, enabled, grabScanDone, wheelHookAttempted;
-        private static int grabHooks, holdHooks, seen, undockAttempts, pending, earlyLogs, startLogs, holdLogs;
+        private static int grabHooks, holdHooks, pending, startLogs, holdLogs;
         [ThreadStatic] private static bool insideFallback;
         private static global::HarmonyLib.Harmony grabHarmony;
         public static bool Available => ready;
@@ -3774,7 +3775,7 @@ namespace QuestMods
                 return;
             }
             enabled = value;
-            if (enabled) { earlyLogs = 0; startLogs = 0; holdLogs = 0; ownershipLogs = 0; pickupLogs = 0; seen = 0; }
+            if (enabled) { startLogs = 0; holdLogs = 0; ownershipLogs = 0; }
             MelonLogger.Msg("[GrabbyHands] " + (enabled ? "ON" : "OFF") + ".");
             UpdateLabels();
         }
@@ -3926,8 +3927,8 @@ namespace QuestMods
         {
             Interlocked.Exchange(ref pending, 0);
             if (enabled) MelonLogger.Msg("[GrabbyHands] Turned OFF on scene load.");
-            enabled = false; seen = 0; undockAttempts = 0; fallbackDetected = false;
-            ownershipLogs = 0; pickupLogs = 0; earlyLogs = 0; startLogs = 0; holdLogs = 0;
+            enabled = false; fallbackDetected = false;
+            ownershipLogs = 0; startLogs = 0; holdLogs = 0;
             UpdateLabels();
             actions.Clear();
             localHandTransforms.Clear();
@@ -4013,7 +4014,7 @@ namespace QuestMods
                     break;
                 }
                 enabled = !enabled;
-                if (enabled) { earlyLogs = 0; startLogs = 0; holdLogs = 0; ownershipLogs = 0; pickupLogs = 0; seen = 0; }
+                if (enabled) { startLogs = 0; holdLogs = 0; ownershipLogs = 0; }
                 MelonLogger.Msg("[GrabbyHands] " + (enabled ? "ON" : "OFF") + ".");
             }
             UpdateLabels();
