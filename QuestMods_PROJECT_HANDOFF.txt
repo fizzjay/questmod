@@ -2,7 +2,7 @@ HARMONY CLIENT PROJECT HANDOFF
 ==============================
 Prepared from the project conversation and the source files available in the workspace.
 Date: 2026-11-04
-Updated: 2026-11-20 (1.9.7 wrist HUD; 1.9.8 sight guards + ESP; 1.9.9 graphics overhaul; 1.9.10/1.9.11 compile fixes; 1.9.12 far detail; 1.9.13 terrain/shadows/lighting; 2.0.0 renamed + sky + P-Noclip; 2.1.0 Make Night + Performance Mode + noclip modes; 2.2.0 aura + grass overhaul)
+Updated: 2026-11-20 (1.9.7 wrist HUD; 1.9.8 sight guards + ESP; 1.9.9 graphics overhaul; 1.9.10/1.9.11 compile fixes; 1.9.12 far detail; 1.9.13 terrain/shadows/lighting; 2.0.0 renamed + sky + P-Noclip; 2.1.0 Make Night + Performance Mode + noclip modes; 2.2.0 aura + grass overhaul; 2.3.0 lag pass + profiler)
 
 PURPOSE OF THIS FILE
 --------------------
@@ -14,7 +14,8 @@ Latest source: Class1.cs (QuestMods 1.9.7, includes the wrist HUD described belo
 Latest version actually tested by the user: Questmods_1.9.5.cs
 Status of 1.9.6: produced and statically checked for balanced delimiters only. It has NOT been compiled by the assistant or tested on the Quest. Do not describe it as verified or working on all slots.
 Status of 1.9.7: adds the wrist FPS / SAFE / NOT SAFE display. The user reported it works on their Quest.
-Status of 2.2.0 (current): 2.1.0 plus the always-on purple aura (shell + orbiting pink/white/blue bits + point light) and the grass overhaul ported from the user's TownGrass mod, recoloured into the Harmony palette. Not compiled or tested here.
+Status of 2.3.0 (current): the user reported "lag is still HORRID" after Performance Mode, so 2.3.0 is a real performance pass plus a built-in frame profiler. Not compiled or tested here.
+Status of 2.2.0: 2.1.0 plus the always-on purple aura (shell + orbiting pink/white/blue bits + point light) and the grass overhaul ported from the user's TownGrass mod, recoloured into the Harmony palette. Not compiled or tested here.
 Status of 2.1.0: 2.0.0 plus Make Night, Performance Mode, and P-Noclip modes (players / props+players / everything). Not compiled or tested here.
 Status of 2.0.0: the mod is renamed Harmony Client and adds the sky (3D stars + planets), the forearm display, P-Noclip, the purple tablet theme attempt, the Make Day fix and the night look. Not compiled or tested here.
 Status of 1.9.13: the user said the 1.9.12 look was "meh, terrain looks shitty" and that far objects and shadows/lighting needed real work, so 1.9.13 reworks the far-detail and lighting pass: terrain heightmapPixelError 1.2 + moderate basemapDistance (6000, NOT 100000), dense detail/trees, soft directional shadows with tighter cascades, three-colour ambient, sun intensity +12%, lodBias 6, and Max Detail (LOD 0) now defaults ON but distance-limited to 500m. New "Keep Post FX" toggle lets the game's grading/bloom survive while fog and blue-film overlays are still stripped. Not compiled or tested here.
@@ -136,6 +137,22 @@ Grass overhaul (pref "Grass Overhaul", default ON, NOT reset at launch):
 - The "cool" recolour: vertex colours are lerped from a dark purple root (0.13,0.03,0.30) to a per-blade tip that mixes hot pink (1,0.42,0.88) and blue (0.42,0.66,1) by the blade's random byte, with a smoothstep height curve. Every mesh is doubled and the second copy has flipped winding, so blades are visible from both sides.
 - Materials: Shader.Find("Township Tale/Grass"), then Cheap/LitVertColor, then WindFoliageVertexColor, then Sprites/Default (unlit neon) as a guaranteed fallback. The game grass shader gets _Color pink-white, _DarkeningFactor 0.35, _Randomness 0.35, _SwayStrength 0.16 and _LightInfluence 1.6; the far material copies the no-sway shader.
 - BlendShader/towngrass.bundle is deliberately NOT used: the user is dropping it in UserData/TownGrass, but Shader.Find covers the built-in shaders, which is what the neon fallback is for.
+
+LAG PASS IN 2.3.0
+------------------
+The user says the lag is present with the graphics overhaul ON or OFF, so the overhaul is not the cause; this pass attacks our own per-frame cost and the few things in the mod that draw a lot.
+
+1. Frame-time profiler. PerfBegin()/PerfEnd(name) wrap every tick inside SyncTabletToggles (sight, hud, esp, graphics, lod0, makeday, perfmode, pnoclip, sky, aura, grass) plus the whole OnUpdate body ("all"). PerfFrameDone() logs one line every 10s: "[Perf] frame X ms | our ticks Y ms | name=ms ...". Ask the user for that line - it names the offender instead of guessing.
+2. FindLoadedType had no negative cache: any type name that did not exist was re-scanned across every assembly on every single call. Misses are now cached as null, so it costs one scan for the lifetime of the process.
+3. Max Detail (LOD 0) is now OFF by default and no longer storms reflection: the LODGroup list is cached and rescanned only every 30s, and ForceLOD is applied per group at most every 10s (20s in performance mode) instead of every 2s.
+4. Sky: the 240 stars are ONE combined mesh (single draw call) with quads facing the centre of the sky, so no per-star billboarding runs any more. This replaced ~220 GameObjects/draw calls updated every 0.4s.
+5. Aura: the orbiting bits are one dynamic 22-quad mesh, rebuilt at 20Hz, instead of 26 GameObjects with their own transforms. The purple point light is now opt-in ("Aura Light (costs frames)", default OFF) because an extra real-time light raises the cost of every lit object in the scene.
+6. Occlusion culling: turning it off is what draws the far world and is very expensive. It is no longer part of the Graphics Overhaul; it is its own toggle "Render More (no occlusion)" (default OFF), so the overhaul keeps the game's occlusion culling unless asked otherwise. Toggling it re-applies the camera settings immediately.
+7. Grass: 18m near / 45m far instead of 26/70, one patch build per frame instead of two, and in performance mode the far ring is cut to 1.5x the near radius.
+8. Reflection caches: FindHeadTransform reflected over nine names on every call (several times per player per 4Hz scan); it now caches the member list per type and the resolved transform per controller for one second. Camera.main and GameTimeManager.IsNight are both cached for one second instead of being looked up per frame.
+9. Performance Mode additionally raises Physics.sleepThreshold to 0.02 (saved and restored) and shortens the grass ring.
+
+If the profiler shows "all" (the whole OnUpdate) far above the sum of the parts, the cost is in the older pre-Harmony systems bounced there (TabletProbe, DevWheelBridge, DebugStateMonitor, GrabbyHands), which are timed together as part of "all" and are the next thing to instrument.
 
 PROJECT GOAL AND USER REQUIREMENTS
 ----------------------------------

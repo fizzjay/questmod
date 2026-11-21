@@ -1,4 +1,4 @@
-// Harmony Client 2.2.0 - wheel, HUD, sight guards, ESP, graphics, sky, aura, grass, P-Noclip.
+// Harmony Client 2.3.0 - wheel, HUD, guards, ESP, graphics, sky, aura, grass, P-Noclip, profiler.
 // Wrist HUD: FPS plus SAFE / NOT SAFE based on nearby players and line of sight.
 // Sight guards: Disconnect / Turn Off / TP Away on sight. ESP: through-wall player highlight.
 // Graphics Overhaul: no fog, no blue film, full-res textures, long draw distance.
@@ -27,7 +27,7 @@ using MelonLoader.Utils;
 using TabletUILib;
 using UnityEngine;
 
-[assembly: MelonInfo(typeof(HarmonyClient.Mod), "Harmony Client", "2.2.0", "you")]
+[assembly: MelonInfo(typeof(HarmonyClient.Mod), "Harmony Client", "2.3.0", "you")]
 [assembly: MelonGame(null, null)]
 [assembly: MelonAdditionalDependencies("TabletUILib")]
 
@@ -41,7 +41,7 @@ namespace HarmonyClient
 
         public override void OnInitializeMelon()
         {
-            LoggerInstance.Msg("=== Harmony Client 2.2.0 ===");
+            LoggerInstance.Msg("=== Harmony Client 2.3.0 ===");
             PatchInitializers();
             GrabbyHands.Install(HarmonyInstance);
             PatchGetter(typeof(QuickAccessMenuAction), "IsDev", typeof(MenuDevPatch));
@@ -82,10 +82,13 @@ namespace HarmonyClient
         private static MelonPreferences_Entry<bool> prefPlayerNoclip;
         private static MelonPreferences_Entry<bool> prefPerfMode;
         private static MelonPreferences_Entry<bool> prefAura;
+        private static MelonPreferences_Entry<bool> prefAuraLight;
+        private static MelonPreferences_Entry<bool> prefNoOcclusion;
         private static MelonPreferences_Entry<bool> prefGrass;
         private static bool lastPerfPref, perfApplied;
         private static bool lastPlayerNoclipPref;
         private static bool lastMaxDetailPref;
+        private static bool lastNoOcclusionPref;
         private static bool lastGrabbyPref, lastSpeedPref, lastFlyPref, lastNoclipPref, lastDurabilityPref;
 
         private void InitTabletUI()
@@ -110,7 +113,7 @@ namespace HarmonyClient
             prefTpAwayOnSight = category.CreateEntry("TpAwayOnSight", false, "TP Away on Sight");
             prefPlayerEsp = category.CreateEntry("PlayerEsp", false, "Player ESP (Thru Walls)");
             prefGraphics = category.CreateEntry("GraphicsOverhaul", false, "Graphics Overhaul");
-            prefMaxDetail = category.CreateEntry("MaxDetail", true, "Max Detail (LOD 0)");
+            prefMaxDetail = category.CreateEntry("MaxDetail", false, "Max Detail (LOD 0)");
             // OFF = remove the colour grading that causes the blue film.
             // ON = keep the game post FX (bloom/contrast) and only strip fog overlays.
             prefKeepPostFx = category.CreateEntry("KeepPostFx", false, "Keep Post FX");
@@ -121,6 +124,13 @@ namespace HarmonyClient
             prefPerfMode = category.CreateEntry("PerfMode", false, "Performance Mode");
             // Aura is cosmetic and meant to be always on, so it is not reset at launch.
             prefAura = category.CreateEntry("Aura", true, "Aura (Purple Shell + Particles)");
+            // The point light adds a per-object lighting cost in a full scene, so
+            // it is opt-in; the shell and bits do not need it.
+            prefAuraLight = category.CreateEntry("AuraLight", false, "Aura Light (costs frames)");
+            // Occlusion culling being off is what makes far geometry appear, and it
+            // is also one of the most expensive things you can do on a Quest, so it
+            // is now its own opt-in switch instead of part of the overhaul.
+            prefNoOcclusion = category.CreateEntry("NoOcclusion", false, "Render More (no occlusion)");
             prefGrass = category.CreateEntry("GrassOverhaul", true, "Grass Overhaul");
 
             prefGrabbyHands.Value = false;
@@ -139,7 +149,7 @@ namespace HarmonyClient
             prefTpAwayOnSight.Value = false;
             prefPlayerEsp.Value = false;
             prefGraphics.Value = false;
-            prefMaxDetail.Value = true;
+            prefMaxDetail.Value = false;
             prefKeepPostFx.Value = false;
             prefPlayerNoclip.Value = false;
             prefPerfMode.Value = false;
@@ -194,6 +204,8 @@ namespace HarmonyClient
                 .Button("P-Noclip Mode: " + PlayerNoclipModeLabel(), () => CyclePlayerNoclipMode())
                 .Toggle("Performance Mode", prefPerfMode)
                 .Toggle("Aura (Purple Shell)", prefAura)
+                .Toggle("Aura Light (costs frames)", prefAuraLight)
+                .Toggle("Render More (no occlusion)", prefNoOcclusion)
                 .Toggle("Grass Overhaul", prefGrass)
                 .Button("Bag Looking", () => ToggleStorage());
         }
@@ -236,6 +248,54 @@ namespace HarmonyClient
                     }
                 }
             }
+        }
+
+        // --- Frame-time profiler ------------------------------------------------
+        // Measures each of our own per-frame systems and logs the winners every
+        // 10s. Cheap (Stopwatch timestamps only), and it is the only way to tell
+        // which of these is actually eating the frame on the user's headset.
+        private static readonly Dictionary<string, double> perfTotals = new Dictionary<string, double>();
+        private static int perfFrames;
+        private static float perfNextLog = -1f;
+        private static long perfMark;
+
+        private static void PerfBegin()
+        {
+            perfMark = System.Diagnostics.Stopwatch.GetTimestamp();
+        }
+
+        private static void PerfEnd(string name)
+        {
+            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+            double ms = (now - perfMark) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            double prev;
+            perfTotals.TryGetValue(name, out prev);
+            perfTotals[name] = prev + ms;
+        }
+
+        private static void PerfFrameDone(float frameMs)
+        {
+            perfFrames++;
+            if (perfNextLog < 0f) perfNextLog = Time.time + 10f;
+            if (Time.time < perfNextLog) return;
+            perfNextLog = Time.time + 10f;
+            if (perfFrames <= 0) return;
+
+            var rows = new List<string>();
+            double ourTotal = 0.0;
+            var sorted = new List<KeyValuePair<string, double>>(perfTotals);
+            sorted.Sort((a, b) => b.Value.CompareTo(a.Value));
+            foreach (var kv in sorted)
+            {
+                double avg = kv.Value / perfFrames;
+                ourTotal += avg;
+                if (avg >= 0.05) rows.Add(kv.Key + "=" + avg.ToString("0.00"));
+            }
+            MelonLogger.Msg("[Perf] frame " + (frameMs > 0f ? frameMs.ToString("0.0") : "?") +
+                "ms | our ticks " + ourTotal.ToString("0.00") + "ms | " +
+                (rows.Count == 0 ? "all under 0.05ms" : string.Join(" ", rows.ToArray())));
+            perfTotals.Clear();
+            perfFrames = 0;
         }
 
         private static void SyncTabletToggles()
@@ -289,6 +349,12 @@ namespace HarmonyClient
                 ApplyGraphicsOverhaul(graphicsAppliedPref);
             }
 
+            if (prefNoOcclusion != null && prefNoOcclusion.Value != lastNoOcclusionPref)
+            {
+                lastNoOcclusionPref = prefNoOcclusion.Value;
+                if (graphicsApplied) { graphicsNextReapply = 0f; ApplyGraphicsCore(); }
+            }
+
             if (prefMaxDetail != null && prefMaxDetail.Value != lastMaxDetailPref)
             {
                 lastMaxDetailPref = prefMaxDetail.Value;
@@ -319,18 +385,36 @@ namespace HarmonyClient
             }
 
             // Read-only displays / guards: a failure here must not stop the other ticks.
+            // Each one is timed so the profiler line can name the real cost.
+            PerfBegin();
             try { TickSightGuard(); }
             catch (Exception ex) { MelonLogger.Warning("[SightGuard] tick failed: " + ex.Message); }
+            PerfEnd("sight");
+
+            PerfBegin();
             try { TickWristHud(); }
             catch (Exception ex) { MelonLogger.Warning("[WristHUD] tick failed: " + ex.Message); }
+            PerfEnd("hud");
+
+            PerfBegin();
             try { TickPlayerEsp(); }
             catch (Exception ex) { MelonLogger.Warning("[PlayerESP] tick failed: " + ex.Message); }
+            PerfEnd("esp");
+
+            PerfBegin();
             try { TickGraphicsOverhaul(); }
             catch (Exception ex) { MelonLogger.Warning("[Graphics] tick failed: " + ex.Message); }
+            PerfEnd("graphics");
+
+            PerfBegin();
             try { TickMaxDetail(); }
             catch (Exception ex) { MelonLogger.Warning("[Graphics] detail tick failed: " + ex.Message); }
+            PerfEnd("lod0");
+
+            PerfBegin();
             try { TickMakeDayLock(); }
             catch (Exception ex) { MelonLogger.Warning("[HarmonyClient] Make Day lock failed: " + ex.Message); }
+            PerfEnd("makeday");
 
             if (prefPlayerNoclip != null && prefPlayerNoclip.Value != lastPlayerNoclipPref)
             {
@@ -344,16 +428,30 @@ namespace HarmonyClient
                 lastPerfPref = prefPerfMode.Value;
                 ApplyPerfMode(lastPerfPref);
             }
+            PerfBegin();
             try { TickPerfMode(); }
             catch (Exception ex) { MelonLogger.Warning("[Perf] tick failed: " + ex.Message); }
+            PerfEnd("perfmode");
+
+            PerfBegin();
             try { TickPlayerNoclip(); }
             catch (Exception ex) { MelonLogger.Warning("[P-Noclip] tick failed: " + ex.Message); }
-            try { TickSky(Camera.main); }
+            PerfEnd("pnoclip");
+
+            PerfBegin();
+            try { TickSky(MainCamera()); }
             catch (Exception ex) { MelonLogger.Warning("[Graphics] sky tick failed: " + ex.Message); }
+            PerfEnd("sky");
+
+            PerfBegin();
             try { TickAura(); }
             catch (Exception ex) { MelonLogger.Warning("[Aura] tick failed: " + ex.Message); }
+            PerfEnd("aura");
+
+            PerfBegin();
             try { TickGrass(); }
             catch (Exception ex) { MelonLogger.Warning("[Grass] tick failed: " + ex.Message); }
+            PerfEnd("grass");
         }
 
         private static void ApplySuperSpeed(bool enabled)
@@ -1196,25 +1294,76 @@ namespace HarmonyClient
             return true;
         }
 
+        // Reflect once per controller type, and reuse the resolved transform for a
+        // second: the guards call this several times per player per scan, and the
+        // uncached version did a metadata lookup for nine names every time.
+        private static readonly Dictionary<Type, MemberInfo[]> headMemberCache = new Dictionary<Type, MemberInfo[]>();
+        private static readonly Dictionary<int, Transform> headTransformCache = new Dictionary<int, Transform>();
+        private static readonly Dictionary<int, float> headTransformTime = new Dictionary<int, float>();
+
+        public static void ClearHeadCaches()
+        {
+            headTransformCache.Clear();
+            headTransformTime.Clear();
+        }
+
         private static Transform FindHeadTransform(object controller)
         {
             if (controller == null) return null;
-            string[] names = { "Head", "head", "HeadTransform", "headTransform", "Camera",
-                               "camera", "CameraTransform", "ViewTransform", "HeadBone" };
+            UnityEngine.Object uo = controller as UnityEngine.Object;
+            int id = 0;
+            if (uo != null)
+            {
+                id = uo.GetInstanceID();
+                Transform cached;
+                float when;
+                if (headTransformCache.TryGetValue(id, out cached) &&
+                    headTransformTime.TryGetValue(id, out when) &&
+                    Time.time - when < 1f && cached != null)
+                    return cached;
+            }
+
             Type t = controller.GetType();
-            foreach (string name in names)
+            MemberInfo[] members;
+            if (!headMemberCache.TryGetValue(t, out members))
+            {
+                string[] names = { "Head", "head", "HeadTransform", "headTransform", "Camera",
+                                   "camera", "CameraTransform", "ViewTransform", "HeadBone" };
+                var found = new List<MemberInfo>(names.Length);
+                foreach (string name in names)
+                {
+                    try
+                    {
+                        MemberInfo m = t.GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                        if (m == null) m = t.GetField(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                        if (m != null) found.Add(m);
+                    }
+                    catch { }
+                }
+                members = found.ToArray();
+                headMemberCache[t] = members;
+            }
+
+            Transform result = null;
+            foreach (MemberInfo m in members)
             {
                 try
                 {
-                    PropertyInfo prop = t.GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                    FieldInfo field = prop == null ? t.GetField(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic) : null;
-                    object value = prop != null ? prop.GetValue(controller) : field?.GetValue(controller);
+                    PropertyInfo prop = m as PropertyInfo;
+                    if (prop != null && prop.GetIndexParameters().Length != 0) continue;
+                    object value = prop != null ? prop.GetValue(controller) : ((FieldInfo)m).GetValue(controller);
                     Transform tr = AsTransform(value);
-                    if (tr != null) return tr;
+                    if (tr != null) { result = tr; break; }
                 }
                 catch { }
             }
-            return null;
+
+            if (uo != null)
+            {
+                headTransformCache[id] = result;
+                headTransformTime[id] = Time.time;
+            }
+            return result;
         }
 
         private static Transform AsTransform(object value)
@@ -1304,6 +1453,8 @@ namespace HarmonyClient
             yield return prefPlayerNoclip;
             yield return prefPerfMode;
             yield return prefAura;
+            yield return prefAuraLight;
+            yield return prefNoOcclusion;
             yield return prefGrass;
         }
 
@@ -1472,6 +1623,7 @@ namespace HarmonyClient
                     return t;
                 }
             }
+            loadedTypeCache[simpleName] = null;   // remember the miss; never rescan per frame
             return null;
         }
 
@@ -1496,6 +1648,7 @@ namespace HarmonyClient
         {
             foreach (var kv in espMarkers) if (kv.Value.Root != null) UnityEngine.Object.Destroy(kv.Value.Root);
             espMarkers.Clear();
+            ClearHeadCaches();
             if (espMaterial != null) UnityEngine.Object.Destroy(espMaterial);
             espMaterial = null;
             espWarned = false;
@@ -1732,6 +1885,8 @@ namespace HarmonyClient
             hasAtmosphere = false;
             maxDetailLogged = false;
             maxDetailNext = 0f;
+            maxDetailRescan = 0f;
+            maxDetailGroups.Clear();
             graphicsNextReapply = 0f;
             if (prefGraphics != null && prefGraphics.Value)
             {
@@ -1926,9 +2081,10 @@ namespace HarmonyClient
                     cam.allowHDR = true;
                     cam.allowMSAA = true;
                     if (cam.farClipPlane < far) cam.farClipPlane = far;
-                    // Render more of the world: occlusion culling is what makes
-                    // distant geometry and whole chunks vanish before you reach them.
-                    cam.useOcclusionCulling = false;
+                    // Render more of the world only when asked: killing occlusion
+                    // culling draws everything in the frustum, which is great for
+                    // seeing far chunks and painful for frame time.
+                    cam.useOcclusionCulling = prefNoOcclusion == null || !prefNoOcclusion.Value;
                     if (cam.clearFlags == CameraClearFlags.SolidColor) cam.clearFlags = CameraClearFlags.Skybox;
                 }
                 catch (Exception ex) { MelonLogger.Warning("[Graphics] camera: " + ex.Message); }
@@ -2146,43 +2302,69 @@ namespace HarmonyClient
             return hasAtmosphere;
         }
 
+        // Camera.main and the night flag are both looked up once a second instead
+        // of every frame; Camera.main in particular is not free on this build.
+        private static Camera cachedMainCamera;
+        private static float cachedCameraTime = -10f;
+
+        private static Camera MainCamera()
+        {
+            if (cachedMainCamera != null && Time.time - cachedCameraTime < 1f) return cachedMainCamera;
+            cachedMainCamera = Camera.main;
+            cachedCameraTime = Time.time;
+            return cachedMainCamera;
+        }
+
+        private static bool nightKnownCache, nightValueCache;
+        private static float nightCacheTime = -10f;
+
         private static bool IsGameNight(out bool known)
         {
-            known = false;
+            if (Time.time - nightCacheTime < 1f)
+            {
+                known = nightKnownCache;
+                return nightValueCache;
+            }
+            nightCacheTime = Time.time;
+            nightKnownCache = false;
+            nightValueCache = false;
             try
             {
                 Type t = FindLoadedType("GameTimeManager");
-                if (t == null) return false;
+                if (t == null) { known = false; return false; }
                 PropertyInfo p = t.GetProperty("IsNight", BindingFlags.Public | BindingFlags.Static | BindingFlags.NonPublic);
-                if (p == null) return false;
+                if (p == null) { known = false; return false; }
                 object v = p.GetValue(null);
-                if (v is bool b) { known = true; return b; }
+                if (v is bool b)
+                {
+                    nightKnownCache = true;
+                    nightValueCache = b;
+                }
             }
             catch { }
-            return false;
+            known = nightKnownCache;
+            return nightValueCache;
         }
 
         // --- Sky: 3D stars and planets ----------------------------------------
-        // Real geometry that lives far inside the camera far plane and follows the
-        // player, so it parallaxes slightly instead of being a flat skybox. Fades
-        // out during the day unless the game's night flag cannot be read.
+        // ONE combined mesh for every star, so the whole sky is a single draw
+        // call instead of a couple of hundred - that alone was a big VR cost.
         private static GameObject skyRoot;
+        private static Mesh skyMesh;
         private static Material skyStarMat, skyPlanetMatA, skyPlanetMatB;
-        private static readonly List<Transform> skyStarTf = new List<Transform>();
         private static bool skyLogged;
-        private static float skyNextBillboard;
 
         public static void SkySceneLoaded()
         {
             if (skyRoot != null) UnityEngine.Object.Destroy(skyRoot);
             skyRoot = null;
-            skyStarTf.Clear();
+            if (skyMesh != null) UnityEngine.Object.Destroy(skyMesh);
+            skyMesh = null;
             if (skyStarMat != null) UnityEngine.Object.Destroy(skyStarMat);
             if (skyPlanetMatA != null) UnityEngine.Object.Destroy(skyPlanetMatA);
             if (skyPlanetMatB != null) UnityEngine.Object.Destroy(skyPlanetMatB);
             skyStarMat = skyPlanetMatA = skyPlanetMatB = null;
             skyLogged = false;
-            skyNextBillboard = 0f;
         }
 
         private static Material SkyMaterial(Color c, bool doubleSided)
@@ -2212,32 +2394,61 @@ namespace HarmonyClient
         {
             if (skyRoot != null) return;
             float radius = Mathf.Clamp(cam != null ? cam.farClipPlane * 0.72f : 2000f, 600f, 3200f);
-            skyStarMat = SkyMaterial(new Color(0.94f, 0.90f, 1f, 1f), true);
+            skyStarMat = SkyMaterial(new Color(1f, 1f, 1f, 1f), true);
             skyPlanetMatA = SkyMaterial(new Color(1f, 0.74f, 0.44f, 1f), false);
             skyPlanetMatB = SkyMaterial(new Color(0.62f, 0.76f, 1f, 1f), false);
             if (skyStarMat == null) return;
 
             skyRoot = new GameObject("HarmonyClient_Sky");
             var rng = new System.Random(4711);
-            for (int i = 0; i < 220; i++)
+            const int starCount = 240;
+            var verts = new Vector3[starCount * 4];
+            var cols = new Color[starCount * 4];
+            var tris = new int[starCount * 6];
+            for (int i = 0; i < starCount; i++)
             {
                 double az = rng.NextDouble() * Math.PI * 2.0;
                 double el = 0.06 + rng.NextDouble() * 1.40;
                 Vector3 dir = new Vector3(
                     (float)(Math.Cos(az) * Math.Cos(el)),
                     (float)Math.Sin(el),
-                    (float)(Math.Sin(az) * Math.Cos(el)));
-                GameObject star = GameObject.CreatePrimitive(PrimitiveType.Quad);
-                star.name = "HarmonyClient_Star";
-                star.transform.SetParent(skyRoot.transform, false);
-                star.transform.position = dir.normalized * radius;
-                float size = radius * (0.0018f + (float)rng.NextDouble() * 0.0042f);
-                star.transform.localScale = new Vector3(size, size, 1f);
-                SkyRenderable(star, skyStarMat);
-                if (i < 200) skyStarTf.Add(star.transform);
+                    (float)(Math.Sin(az) * Math.Cos(el))).normalized;
+                Vector3 pos = dir * radius;
+                // Quads face the centre of the sky, where the player is, so they
+                // are visible from any view direction without per-star billboarding.
+                Vector3 right = Vector3.Cross(Vector3.up, dir);
+                if (right.sqrMagnitude < 0.0001f) right = Vector3.right;
+                right = right.normalized;
+                Vector3 up = Vector3.Cross(dir, right).normalized;
+                float size = radius * (0.0016f + (float)rng.NextDouble() * 0.0040f);
+                int v = i * 4;
+                verts[v + 0] = pos - right * size - up * size;
+                verts[v + 1] = pos + right * size - up * size;
+                verts[v + 2] = pos + right * size + up * size;
+                verts[v + 3] = pos - right * size + up * size;
+                Color c = Color.Lerp(new Color(1f, 1f, 1f), new Color(0.86f, 0.80f, 1f), (float)rng.NextDouble());
+                c.a = 0.55f + (float)rng.NextDouble() * 0.45f;
+                cols[v + 0] = cols[v + 1] = cols[v + 2] = cols[v + 3] = c;
+                int t = i * 6;
+                tris[t] = v; tris[t + 1] = v + 1; tris[t + 2] = v + 2;
+                tris[t + 3] = v; tris[t + 4] = v + 2; tris[t + 5] = v + 3;
             }
+            skyMesh = new Mesh();
+            skyMesh.name = "HarmonyClient_Stars";
+            skyMesh.vertices = verts;
+            skyMesh.colors = cols;
+            skyMesh.triangles = tris;
+            skyMesh.RecalculateBounds();
 
-            // A few big planets, including a ringed-looking one.
+            GameObject starGo = new GameObject("HarmonyClient_Stars");
+            starGo.transform.SetParent(skyRoot.transform, false);
+            MeshFilter mf = starGo.AddComponent<MeshFilter>();
+            mf.sharedMesh = skyMesh;
+            MeshRenderer mr = starGo.AddComponent<MeshRenderer>();
+            mr.sharedMaterial = skyStarMat;
+            mr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            mr.receiveShadows = false;
+
             Vector3[] planetDirs =
             {
                 new Vector3(-0.45f, 0.62f, 0.65f),
@@ -2271,22 +2482,11 @@ namespace HarmonyClient
             if (skyRoot.activeSelf != show) skyRoot.SetActive(show);
             if (!show) return;
             if (cam != null) skyRoot.transform.position = cam.transform.position;
-            skyRoot.transform.Rotate(0f, 0.5f * Time.deltaTime, 0f, Space.World);
-            if (Time.time < skyNextBillboard) return;
-            skyNextBillboard = Time.time + (PerfOn ? 0.9f : 0.4f);
-            if (cam == null) return;
-            Vector3 eye = cam.transform.position;
-            foreach (Transform tf in skyStarTf)
-            {
-                if (tf == null) continue;
-                Vector3 away = tf.position - eye;
-                if (away.sqrMagnitude < 1f) continue;
-                tf.rotation = Quaternion.LookRotation(away, Vector3.up);
-            }
+            skyRoot.transform.Rotate(0f, 0.4f * Time.deltaTime, 0f, Space.World);
             if (!skyLogged)
             {
                 skyLogged = true;
-                MelonLogger.Msg("[Graphics] Sky: " + skyStarTf.Count + " stars and 3 planets placed.");
+                MelonLogger.Msg("[Graphics] Sky: one-mesh star field (1 draw call) + 3 planets.");
             }
         }
 
@@ -2495,37 +2695,49 @@ namespace HarmonyClient
         // Max Detail: force every LODGroup to its highest-detail mesh, so nothing
         // drops to a low-poly version in the distance. Heavy, so it is its own
         // toggle and is not needed for the normal overhaul.
+        private static readonly List<UnityEngine.Object> maxDetailGroups = new List<UnityEngine.Object>();
+        private static float maxDetailRescan;
+
         private static void TickMaxDetail()
         {
             if (prefMaxDetail == null || !prefMaxDetail.Value) return;
             if (Time.time < maxDetailNext) return;
-            maxDetailNext = Time.time + (PerfOn ? 6f : 2f);
+            maxDetailNext = Time.time + (PerfOn ? 20f : 10f);
             Type lodType = FindLoadedType("LODGroup");
             if (lodType == null) return;
             MethodInfo force = lodType.GetMethod("ForceLOD", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             if (force == null) return;
-            int shown = 0;
+
+            // The group list is cached; a reflection call per group every couple of
+            // seconds was itself a frame-time hog on a big scene.
+            if (Time.time >= maxDetailRescan || maxDetailGroups.Count == 0)
+            {
+                maxDetailRescan = Time.time + 30f;
+                maxDetailGroups.Clear();
+                try
+                {
+                    foreach (UnityEngine.Object o in UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.From(lodType)))
+                        if (o != null) maxDetailGroups.Add(o);
+                }
+                catch (Exception ex) { MelonLogger.Warning("[Graphics] LOD scan: " + ex.Message); }
+            }
+
             PlayerController pc = PlayerController.Current;
             Vector3 eye = pc != null ? pc.PlayerFeetPosition : Vector3.zero;
             bool haveEye = pc != null;
-            try
+            int shown = 0;
+            foreach (UnityEngine.Object o in maxDetailGroups)
             {
-                foreach (UnityEngine.Object o in UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.From(lodType)))
-                {
-                    if (o == null) continue;
-                    UnityEngine.Component c = o as UnityEngine.Component;
-                    if (c == null) continue;
-                    // Only objects you can actually see in detail need LOD0; forcing
-                    // it on the whole world past this range just burns frame time.
-                    if (haveEye && (c.transform.position - eye).sqrMagnitude > 500f * 500f) continue;
-                    try { force.Invoke(o, new object[] { 0 }); shown++; } catch { }
-                }
+                if (o == null) continue;
+                UnityEngine.Component c = o as UnityEngine.Component;
+                if (c == null) continue;
+                if (haveEye && (c.transform.position - eye).sqrMagnitude > 500f * 500f) continue;
+                try { force.Invoke(o, new object[] { 0 }); shown++; } catch { }
             }
-            catch (Exception ex) { MelonLogger.Warning("[Graphics] LOD scan: " + ex.Message); }
             if (shown > 0 && !maxDetailLogged)
             {
                 maxDetailLogged = true;
-                MelonLogger.Msg("[Graphics] Max Detail: highest LOD forced on " + shown + " groups.");
+                MelonLogger.Msg("[Graphics] Max Detail: highest LOD forced on " + shown + " group(s).");
             }
         }
 
@@ -3168,6 +3380,7 @@ namespace HarmonyClient
         private static bool savedAutoSync;
         private static float savedFixedDelta;
         private static int savedVSync, savedTargetFps;
+        private static float savedSleepThreshold = 0.005f;
         private static float perfNextScan;
         private static readonly List<SkinnedMeshRenderer> perfSkinned = new List<SkinnedMeshRenderer>();
 
@@ -3185,12 +3398,14 @@ namespace HarmonyClient
                         savedFixedDelta = Time.fixedDeltaTime;
                         savedVSync = QualitySettings.vSyncCount;
                         savedTargetFps = Application.targetFrameRate;
+                        savedSleepThreshold = Physics.sleepThreshold;
                         perfTracking = true;
                     }
                     Physics.autoSyncTransforms = false;
                     if (Time.fixedDeltaTime < 0.0333f) Time.fixedDeltaTime = 0.0333f;
                     QualitySettings.vSyncCount = 0;
                     Application.targetFrameRate = 72;
+                    Physics.sleepThreshold = 0.02f;
                     perfApplied = true;
                     perfNextScan = 0f;
                     MelonLogger.Msg("[Perf] ON: auto transform sync off, 30Hz physics, vsync off, 72fps target, offscreen skinned meshes culled.");
@@ -3203,6 +3418,7 @@ namespace HarmonyClient
                         Time.fixedDeltaTime = savedFixedDelta;
                         QualitySettings.vSyncCount = savedVSync;
                         Application.targetFrameRate = savedTargetFps;
+                        Physics.sleepThreshold = savedSleepThreshold;
                         perfTracking = false;
                     }
                     foreach (SkinnedMeshRenderer smr in perfSkinned)
@@ -3454,17 +3670,14 @@ namespace HarmonyClient
         }
 
         // --- Aura: constant purple shell with pink / white / blue bits ---------
-        // The game's own ShellAnimator lives in Alta.PlayerEffects, which this
-        // project does not reference, so the shell is rebuilt from primitives: a
-        // translucent sphere around the body, orbiting quads in the palette, and a
-        // purple point light so it actually lights nearby ground.
+        // The game's ShellAnimator lives in Alta.PlayerEffects, which this project
+        // does not reference, so the shell is built from primitives. All orbiting
+        // bits share ONE dynamic mesh (one draw call) whose quads are rebuilt at
+        // 20Hz to face the camera.
         private class AuraBit
         {
-            public Transform Tf;
-            public Material Mat;
-            public float Phase, Speed, Radius, Height, Size;
-            public int Palette;      // 0 pink, 1 white, 2 blue, 3 purple
-            public float SizePhase;
+            public float Phase, Speed, Radius, Height, Size, SizePhase;
+            public Color Tint;
         }
 
         private static readonly Color[] auraPalette =
@@ -3475,22 +3688,34 @@ namespace HarmonyClient
             new Color(0.72f, 0.38f, 1f)    // purple
         };
 
+        private const int AuraBitCount = 22;
+
         private static GameObject auraRoot;
-        private static Renderer auraShell;
         private static Material auraShellMat;
         private static Light auraLight;
+        private static Mesh auraMesh;
+        private static MeshFilter auraFilter;
+        private static Material auraBitMat;
+        private static Vector3[] auraVerts;
+        private static Color[] auraCols;
         private static readonly List<AuraBit> auraBits = new List<AuraBit>();
         private static float auraNextBit;
 
         private static bool AuraOn => prefAura != null && prefAura.Value;
+        private static bool AuraLightOn => prefAuraLight != null && prefAuraLight.Value;
 
         public static void AuraSceneLoaded()
         {
             if (auraRoot != null) UnityEngine.Object.Destroy(auraRoot);
             auraRoot = null;
-            auraShell = null;
             auraShellMat = null;
             auraLight = null;
+            if (auraMesh != null) UnityEngine.Object.Destroy(auraMesh);
+            auraMesh = null;
+            auraFilter = null;
+            auraBitMat = null;
+            auraVerts = null;
+            auraCols = null;
             auraBits.Clear();
             auraNextBit = 0f;
         }
@@ -3510,7 +3735,7 @@ namespace HarmonyClient
         private static void BuildAura()
         {
             auraRoot = new GameObject("HarmonyClient_Aura");
-            auraShellMat = AuraMaterial(new Color(0.55f, 0.22f, 1f, 0.14f));
+            auraShellMat = AuraMaterial(new Color(0.55f, 0.22f, 1f, 0.13f));
             GameObject shell = GameObject.CreatePrimitive(PrimitiveType.Sphere);
             shell.name = "HarmonyClient_AuraShell";
             shell.transform.SetParent(auraRoot.transform, false);
@@ -3518,56 +3743,70 @@ namespace HarmonyClient
             shell.transform.localScale = new Vector3(1.5f, 1.7f, 1.5f);
             Collider shellCol = shell.GetComponent<Collider>();
             if (shellCol != null) UnityEngine.Object.Destroy(shellCol);
-            auraShell = shell.GetComponent<Renderer>();
-            if (auraShell != null)
+            Renderer shellRenderer = shell.GetComponent<Renderer>();
+            if (shellRenderer != null)
             {
-                auraShell.material = auraShellMat;
-                auraShell.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-                auraShell.receiveShadows = false;
+                shellRenderer.material = auraShellMat;
+                shellRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                shellRenderer.receiveShadows = false;
             }
 
             var rng = new System.Random(2718);
-            for (int i = 0; i < 26; i++)
+            auraBits.Clear();
+            auraVerts = new Vector3[AuraBitCount * 4];
+            auraCols = new Color[AuraBitCount * 4];
+            int[] tris = new int[AuraBitCount * 6];
+            for (int i = 0; i < AuraBitCount; i++)
             {
-                GameObject bit = GameObject.CreatePrimitive(PrimitiveType.Quad);
-                bit.name = "HarmonyClient_AuraBit";
-                bit.transform.SetParent(auraRoot.transform, false);
-                Collider bitCol = bit.GetComponent<Collider>();
-                if (bitCol != null) UnityEngine.Object.Destroy(bitCol);
-                Material mat = AuraMaterial(auraPalette[i % auraPalette.Length]);
-                Renderer r = bit.GetComponent<Renderer>();
-                if (r != null)
+                Color tint = auraPalette[i % auraPalette.Length];
+                auraBits.Add(new AuraBit
                 {
-                    r.material = mat;
-                    r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-                    r.receiveShadows = false;
-                }
-                var a = new AuraBit
-                {
-                    Tf = bit.transform,
-                    Mat = mat,
                     Phase = (float)(rng.NextDouble() * Math.PI * 2.0),
                     Speed = 0.5f + (float)rng.NextDouble() * 1.1f,
                     Radius = 0.55f + (float)rng.NextDouble() * 0.45f,
                     Height = 0.75f + (float)rng.NextDouble() * 0.9f,
                     Size = 0.030f + (float)rng.NextDouble() * 0.045f,
                     SizePhase = (float)(rng.NextDouble() * Math.PI * 2.0),
-                    Palette = i % auraPalette.Length
-                };
-                auraBits.Add(a);
+                    Tint = tint
+                });
+                int v = i * 4;
+                auraCols[v + 0] = auraCols[v + 1] = auraCols[v + 2] = auraCols[v + 3] = tint;
+                int t = i * 6;
+                tris[t] = v; tris[t + 1] = v + 1; tris[t + 2] = v + 2;
+                tris[t + 3] = v; tris[t + 4] = v + 2; tris[t + 5] = v + 3;
             }
 
-            GameObject lightGo = new GameObject("HarmonyClient_AuraLight");
-            lightGo.transform.SetParent(auraRoot.transform, false);
-            lightGo.transform.localPosition = new Vector3(0f, 1.2f, 0f);
-            auraLight = lightGo.AddComponent<Light>();
-            auraLight.type = LightType.Point;
-            auraLight.color = new Color(0.72f, 0.42f, 1f);
-            auraLight.range = 5f;
-            auraLight.intensity = 1.4f;
-            auraLight.shadows = LightShadows.None;
+            auraMesh = new Mesh();
+            auraMesh.name = "HarmonyClient_AuraBits";
+            auraMesh.vertices = auraVerts;
+            auraMesh.colors = auraCols;
+            auraMesh.triangles = tris;
+            auraMesh.bounds = new Bounds(new Vector3(0f, 1.2f, 0f), new Vector3(4f, 4f, 4f));
 
-            MelonLogger.Msg("[Aura] Shell + " + auraBits.Count + " orbiting bits + purple light created.");
+            GameObject bits = new GameObject("HarmonyClient_AuraBits");
+            bits.transform.SetParent(auraRoot.transform, false);
+            auraFilter = bits.AddComponent<MeshFilter>();
+            auraFilter.sharedMesh = auraMesh;
+            auraBitMat = AuraMaterial(Color.white);
+            MeshRenderer br = bits.AddComponent<MeshRenderer>();
+            br.sharedMaterial = auraBitMat;
+            br.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            br.receiveShadows = false;
+
+            if (AuraLightOn)
+            {
+                GameObject lightGo = new GameObject("HarmonyClient_AuraLight");
+                lightGo.transform.SetParent(auraRoot.transform, false);
+                lightGo.transform.localPosition = new Vector3(0f, 1.2f, 0f);
+                auraLight = lightGo.AddComponent<Light>();
+                auraLight.type = LightType.Point;
+                auraLight.range = 5f;
+                auraLight.intensity = 1.3f;
+                auraLight.shadows = LightShadows.None;
+            }
+
+            MelonLogger.Msg("[Aura] Shell + one-mesh bit field (" + AuraBitCount + " bits, 1 draw call)" +
+                (AuraLightOn ? " + purple light." : "."));
         }
 
         private static void TickAura()
@@ -3594,36 +3833,36 @@ namespace HarmonyClient
             if (auraShellMat != null)
             {
                 Color shell = auraPalette[3];
-                float pulse = 0.10f + 0.06f * Mathf.Sin(t * 1.7f);
+                float pulse = 0.09f + 0.05f * Mathf.Sin(t * 1.7f);
                 auraShellMat.SetColor("_Color", new Color(shell.r, shell.g, shell.b, pulse));
             }
             if (auraLight != null)
             {
-                // subtle hue travel between purple and pink
                 float mix = 0.5f + 0.5f * Mathf.Sin(t * 0.9f);
                 auraLight.color = Color.Lerp(auraPalette[3], auraPalette[0], mix);
-                auraLight.intensity = 1.2f + 0.35f * Mathf.Sin(t * 2.3f);
+                auraLight.intensity = 1.15f + 0.3f * Mathf.Sin(t * 2.3f);
             }
+            if (auraFilter == null || auraMesh == null) return;
             if (Time.time < auraNextBit) return;
             auraNextBit = Time.time + 0.05f;
 
-            Camera cam = Camera.main;
-            Vector3 eye = cam != null ? cam.transform.position : feet + Vector3.up * 1.5f;
+            Camera cam = MainCamera();
+            Vector3 right = cam != null ? cam.transform.right : Vector3.right;
+            Vector3 up = cam != null ? cam.transform.up : Vector3.up;
             for (int i = 0; i < auraBits.Count; i++)
             {
                 AuraBit b = auraBits[i];
-                if (b == null || b.Tf == null) continue;
                 float ang = b.Phase + t * b.Speed;
                 float y = b.Height + Mathf.Sin(t * 1.6f + b.Phase) * 0.28f;
-                Vector3 local = new Vector3(Mathf.Cos(ang) * b.Radius, y, Mathf.Sin(ang) * b.Radius);
-                b.Tf.localPosition = local;
-                float size = b.Size * (0.7f + 0.5f * Mathf.Sin(t * 3f + b.SizePhase));
-                b.Tf.localScale = new Vector3(size, size, size);
-                Vector3 world = b.Tf.position;
-                Vector3 away = world - eye;
-                if (away.sqrMagnitude > 0.0001f)
-                    b.Tf.rotation = Quaternion.LookRotation(away, Vector3.up);
+                Vector3 p = new Vector3(Mathf.Cos(ang) * b.Radius, y, Mathf.Sin(ang) * b.Radius);
+                float s = b.Size * (0.7f + 0.5f * Mathf.Sin(t * 3f + b.SizePhase));
+                int v = i * 4;
+                auraVerts[v + 0] = p - right * s - up * s;
+                auraVerts[v + 1] = p + right * s - up * s;
+                auraVerts[v + 2] = p + right * s + up * s;
+                auraVerts[v + 3] = p - right * s + up * s;
             }
+            auraMesh.vertices = auraVerts;
         }
 
         // --- Grass overhaul (grass data ported from the TownGrass mod) ----------
@@ -3652,9 +3891,9 @@ namespace HarmonyClient
             public byte[] Cnt;
         }
 
-        private const float GrassNearDistance = 26f;
-        private const float GrassFarDistance = 70f;
-        private const int GrassBuildsPerFrame = 2;
+        private const float GrassNearDistance = 18f;
+        private const float GrassFarDistance = 45f;
+        private const int GrassBuildsPerFrame = 1;
 
         private static byte[] grassData;
         private static int grassTableEnd;
@@ -4065,7 +4304,8 @@ namespace HarmonyClient
                 }
                 Vector3 eye = pc.PlayerFeetPosition;
                 float nearSq = GrassNearDistance * GrassNearDistance;
-                float farSq = GrassFarDistance * GrassFarDistance;
+                float farLimit = PerfOn ? GrassNearDistance * 1.5f : GrassFarDistance;
+                float farSq = farLimit * farLimit;
                 foreach (GrassPatch gp in grassPatches)
                 {
                     float dx = Mathf.Max(Mathf.Max(gp.MinX - eye.x, 0f), eye.x - gp.MaxX);
@@ -4527,8 +4767,13 @@ namespace HarmonyClient
 
         public override void OnUpdate()
         {
+            float frameMs = Time.smoothDeltaTime * 1000f;
+            PerfBegin();
             try { TabletProbe.Tick(); DevWheelBridge.Tick(); DebugStateMonitor.Tick(); GrabbyHands.Tick(); SyncTabletToggles(); }
             catch (Exception ex) { LoggerInstance.Warning("Tablet probe tick: " + ex.Message); }
+            PerfEnd("all");
+            try { PerfFrameDone(frameMs); }
+            catch (Exception ex) { LoggerInstance.Warning("[Perf] report failed: " + ex.Message); }
             if (reports >= 12 || DateTime.UtcNow < nextReport) return;
             reports++;
             nextReport = DateTime.UtcNow.AddSeconds(20);
