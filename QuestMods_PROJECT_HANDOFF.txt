@@ -2,7 +2,7 @@ QUESTMODS PROJECT HANDOFF
 ========================
 Prepared from the project conversation and the source files available in the workspace.
 Date: 2026-11-04
-Updated: 2026-11-20 (1.9.7 wrist HUD; 1.9.8 sight guards + ESP; 1.9.9 graphics overhaul; 1.9.10/1.9.11 compile fixes; 1.9.12 far-detail work)
+Updated: 2026-11-20 (1.9.7 wrist HUD; 1.9.8 sight guards + ESP; 1.9.9 graphics overhaul; 1.9.10/1.9.11 compile fixes; 1.9.12 far detail; 1.9.13 terrain/shadows/lighting)
 
 PURPOSE OF THIS FILE
 --------------------
@@ -14,7 +14,8 @@ Latest source: Class1.cs (QuestMods 1.9.7, includes the wrist HUD described belo
 Latest version actually tested by the user: Questmods_1.9.5.cs
 Status of 1.9.6: produced and statically checked for balanced delimiters only. It has NOT been compiled by the assistant or tested on the Quest. Do not describe it as verified or working on all slots.
 Status of 1.9.7: adds the wrist FPS / SAFE / NOT SAFE display. The user reported it works on their Quest.
-Status of 1.9.12 (current): 1.9.11 plus far-detail work: 4000m default view, camera occlusion culling off, terrain basemap/heightmap fixed so distant ground keeps real detail, streaming mipmaps off, 9x anisotropy, and a separate "Max Detail (LOD 0)" toggle. Not compiled or tested here.
+Status of 1.9.13 (current): the user said the 1.9.12 look was "meh, terrain looks shitty" and that far objects and shadows/lighting needed real work, so 1.9.13 reworks the far-detail and lighting pass: terrain heightmapPixelError 1.2 + moderate basemapDistance (6000, NOT 100000), dense detail/trees, soft directional shadows with tighter cascades, three-colour ambient, sun intensity +12%, lodBias 6, and Max Detail (LOD 0) now defaults ON but distance-limited to 500m. New "Keep Post FX" toggle lets the game's grading/bloom survive while fog and blue-film overlays are still stripped. Not compiled or tested here.
+Status of 1.9.12: 1.9.11 plus far-detail work: 4000m default view, camera occlusion culling off, terrain basemap/heightmap fixed so distant ground keeps real detail, streaming mipmaps off, 9x anisotropy, and a separate "Max Detail (LOD 0)" toggle. Not compiled or tested here.
 Status of 1.9.11: 1.9.10 plus the Il2CppSystem.Type fix in MakeDay (see the compile-fix section).
 Status of 1.9.10: 1.9.9 with the compiler errors the user reported fixed (DayTimeManager, ParticleSystemRenderer, bare Il2CppType, unused GrabbyHands counters). Not compiled here; the user compiles in their own Unity/Quest project.
 Status of 1.9.9: 1.9.8 plus the Graphics Overhaul toggle (see its own section). It has NOT been compiled or tested on the Quest here; only a C# syntax parse and whitespace check were possible.
@@ -72,7 +73,18 @@ What it changes while ON (everything is snapshotted first and restored when it t
 Safety: all of it is client-side visuals. Nothing is sent to other players. Turning the toggle OFF restores the snapshotted fog, ambient, camera, quality and XR values and re-enables every component/renderer it disabled. The toggle is also part of the "Turn Off on Sight" panic set, so a panic returns the original visuals too.
 
 - Far-detail work (1.9.12, the "far away things look bad" complaint): ApplyTerrainBoost() finds the Terrain type by reflection, gets every terrain with FindObjectsOfType(Il2CppType.From(terrainType)) and, per terrain, snapshots then sets basemapDistance 100000, heightmapMaximumLOD 0, detailObjectDistance 450, treeDistance 4000, treeBillboardDistance 2000, treeMaximumFullLODCount 1200, drawTreesAndFoliage true. Unity normally switches distant terrain to a low-res basemap and a coarse heightmap LOD, which is exactly why far hills looked flat and blurry; raising both keeps the real terrain shader and full geometry far out. All original values are captured in TerrainSnap and written back on toggle off. Terrain and LODGroup are never named at compile time (only through FindLoadedType + Il2CppType.From) so no new assembly reference is needed.
-- Max Detail (LOD 0): TickMaxDetail() re-forces LODGroup.ForceLOD(0) on every group every 2s while the toggle is on, and RestoreMaxDetail() walks the groups again with ForceLOD(-1) when it is turned off. Reflection only, as above.
+- Max Detail (LOD 0) (1.9.12, reworked 1.9.13): defaults ON. TickMaxDetail() re-forces LODGroup.ForceLOD(0) every 2s for groups within 500m of the player only - forcing LOD0 on the whole world is pure frame-time burn for no visible gain. RestoreMaxDetail() walks the groups with ForceLOD(-1) when the toggle is turned off. Reflection only, as above.
+
+FAR-DETAIL AND LIGHTING REWORK IN 1.9.13
+----------------------------------------
+User feedback on 1.9.12: "meh terrain looks shitty and also far objects just go all out and add actual like improvements to shadows lighting".
+- Terrain: 1.9.12 set basemapDistance to 100000, which makes the terrain shader alias badly at long range and looked worse. 1.9.13 sets basemapDistance 6000, and adds the value that actually fixes faceted hills: heightmapPixelError 1.2 (Unity default is about 5). Also detailObjectDistance 600, detailObjectDensity 1, treeDistance 5000, treeBillboardDistance 2500, treeMaximumFullLODCount 2000, treeLODBiasMultiplier 2, heightmapMaximumLOD 0, drawTreesAndFoliage true, followed by Terrain.Flush() if the build has it. All ten members are snapshotted per terrain in a Dictionary<string, object> so RestoreTerrain() puts every one back.
+- Shadows: shadowDistance 300, shadowCascades 4, shadowResolution VeryHigh, shadowProjection StableFit (the sun moves, so stable fit is right for a big world), shadowCascade4Split (0.05, 0.15, 0.4) so the near cascade is sharp instead of the four cascades being spread over the whole view, shadowNearPlaneOffset 1.
+- Lights: ApplyLightBoost() finds every Light, keeps directional ones only, snapshots intensity/shadows/shadowStrength once, then sets LightShadows.Soft, shadowStrength 0.95 and intensity = original * 1.12. The multiplication is always from the stored original, never from the current value, because the sun intensity changes with time of day and a periodic re-apply would otherwise run away. RestoreLights() puts the originals back.
+- Ambient: RenderSettings.ambientMode is set to Trilight with sky (0.58,0.62,0.72), equator (0.52,0.50,0.46) and ground (0.34,0.31,0.26), ambientIntensity 1.25, reflectionIntensity 1.3 and skybox _Exposure 1.3. The old flat cold ambient is what made everything look washed out. All of it is snapshotted and restored.
+- Far objects: lodBias raised to 6, maximumLODLevel 0, streaming mipmaps off. Max Detail (LOD 0) is now ON by default, 500m radius.
+- New toggle "Keep Post FX (bloom/contrast)": when ON, ScanAndDisableGraphicsExtras() skips everything in graphicsPostTypes / graphicsPostFragments (volume, colour grading, tonemapping, bloom, vignette, grain, SSAO, DoF, etc.) and still disables fog volumes, underwater and blue-film overlays. This exists because removing the game's grading can make terrain look flat; if the user reports a washed-out look, tell them to flip this on.
+
 
 Known trade-offs / things to verify on-device: full-res textures + 200m shadows + a 4000m far plane + occlusion culling off cost GPU time (and the extra geometry is the single biggest cost), so watch the wrist FPS readout and lower "Overhaul Sharp" first, then "Overhaul View", if it drops, so watch the wrist FPS readout and lower "Overhaul Sharp" first if it drops; disabling the global post-process Volume removes bloom as well as the blue tint (ask for a sub-toggle if bloom should stay); "antiAliasing" is usually fixed at startup on Quest and may be ignored; if a wanted visual effect is disabled by the name scan, its "[Graphics] Disabled ..." log line names it.
 

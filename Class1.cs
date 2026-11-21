@@ -1,4 +1,4 @@
-// QuestMods 1.9.12 - wheel + wrist HUD + sight guards + player ESP + graphics overhaul.
+// QuestMods 1.9.13 - wheel + wrist HUD + sight guards + player ESP + graphics overhaul.
 // Wrist HUD: FPS plus SAFE / NOT SAFE based on nearby players and line of sight.
 // Sight guards: Disconnect / Turn Off / TP Away on sight. ESP: through-wall player highlight.
 // Graphics Overhaul: no fog, no blue film, full-res textures, long draw distance.
@@ -27,7 +27,7 @@ using MelonLoader.Utils;
 using TabletUILib;
 using UnityEngine;
 
-[assembly: MelonInfo(typeof(QuestMods.Mod), "QuestMods", "1.9.12", "you")]
+[assembly: MelonInfo(typeof(QuestMods.Mod), "QuestMods", "1.9.13", "you")]
 [assembly: MelonGame(null, null)]
 [assembly: MelonAdditionalDependencies("TabletUILib")]
 
@@ -41,7 +41,7 @@ namespace QuestMods
 
         public override void OnInitializeMelon()
         {
-            LoggerInstance.Msg("=== QuestMods 1.9.12: wheel + wrist HUD + sight guards + ESP + graphics ===");
+            LoggerInstance.Msg("=== QuestMods 1.9.13: wheel + wrist HUD + sight guards + ESP + graphics ===");
             PatchInitializers();
             GrabbyHands.Install(HarmonyInstance);
             PatchGetter(typeof(QuickAccessMenuAction), "IsDev", typeof(MenuDevPatch));
@@ -78,6 +78,7 @@ namespace QuestMods
         private static MelonPreferences_Entry<bool> prefPlayerEsp;
         private static MelonPreferences_Entry<bool> prefGraphics;
         private static MelonPreferences_Entry<bool> prefMaxDetail;
+        private static MelonPreferences_Entry<bool> prefKeepPostFx;
         private static bool lastMaxDetailPref;
         private static bool lastGrabbyPref, lastSpeedPref, lastFlyPref, lastNoclipPref, lastDurabilityPref;
 
@@ -103,7 +104,10 @@ namespace QuestMods
             prefTpAwayOnSight = category.CreateEntry("TpAwayOnSight", false, "TP Away on Sight");
             prefPlayerEsp = category.CreateEntry("PlayerEsp", false, "Player ESP (Thru Walls)");
             prefGraphics = category.CreateEntry("GraphicsOverhaul", false, "Graphics Overhaul");
-            prefMaxDetail = category.CreateEntry("MaxDetail", false, "Max Detail (LOD 0)");
+            prefMaxDetail = category.CreateEntry("MaxDetail", true, "Max Detail (LOD 0)");
+            // OFF = remove the colour grading that causes the blue film.
+            // ON = keep the game post FX (bloom/contrast) and only strip fog overlays.
+            prefKeepPostFx = category.CreateEntry("KeepPostFx", false, "Keep Post FX");
 
             prefGrabbyHands.Value = false;
             prefSuperSpeed.Value = false;
@@ -121,7 +125,8 @@ namespace QuestMods
             prefTpAwayOnSight.Value = false;
             prefPlayerEsp.Value = false;
             prefGraphics.Value = false;
-            prefMaxDetail.Value = false;
+            prefMaxDetail.Value = true;
+            prefKeepPostFx.Value = false;
 
             InstallExtraPatches(HarmonyInstance);
 
@@ -165,6 +170,7 @@ namespace QuestMods
                 .Button("Overhaul View: " + graphicsRanges[graphicsRangeIndex] + "m", () => CycleGraphicsRange())
                 .Button("Overhaul Sharp: " + GraphicsSharpLabel(), () => CycleGraphicsSharp())
                 .Toggle("Max Detail (LOD 0)", prefMaxDetail)
+                .Toggle("Keep Post FX (bloom/contrast)", prefKeepPostFx)
                 .Button("Bag Looking", () => ToggleStorage());
         }
 
@@ -179,6 +185,7 @@ namespace QuestMods
                 .Button("Overhaul View: camera draw distance", () => { })
                 .Button("Overhaul Sharp: headset render scale", () => { })
                 .Button("Max Detail: force highest LOD everywhere", () => { })
+                .Button("Keep Post FX: leave grading, strip blue film", () => { })
                 .Button("Wrist HUD: FPS + SAFE / NOT SAFE", () => { })
                 .Button("Safe Range: how far 'around you' is", () => { })
                 .Button("Seen = clear sight + looking at you", () => { })
@@ -1554,7 +1561,8 @@ namespace QuestMods
             "pixelLightCount", "antiAliasing", "shadowDistance", "shadowCascades",
             "shadowResolution", "shadowProjection", "softParticles", "softVegetation",
             "realtimeReflectionProbes", "billboardsFaceCameraPosition",
-            "particleRaycastBudget", "skinWeights", "streamingMipmapsActive"
+            "particleRaycastBudget", "skinWeights", "streamingMipmapsActive",
+            "shadowCascade4Split", "shadowNearPlaneOffset"
         };
         private static int graphicsRangeIndex;      // 0 = 4000m default
         private static int graphicsSharpIndex = 1;  // 1 = 1.15x default
@@ -1567,6 +1575,7 @@ namespace QuestMods
         private static FogMode savedFogMode;
         private static UnityEngine.Rendering.AmbientMode savedAmbientMode;
         private static Color savedAmbientLight;
+        private static Color savedAmbientSky, savedAmbientEquator, savedAmbientGround;
         private static float savedAmbientIntensity, savedReflectionIntensity;
         private static object savedXrResolutionScale, savedXrViewportScale;
         private static Material savedSkybox;
@@ -1753,6 +1762,9 @@ namespace QuestMods
             savedFogMode = RenderSettings.fogMode;
             savedAmbientMode = RenderSettings.ambientMode;
             savedAmbientLight = RenderSettings.ambientLight;
+            savedAmbientSky = RenderSettings.ambientSkyColor;
+            savedAmbientEquator = RenderSettings.ambientEquatorColor;
+            savedAmbientGround = RenderSettings.ambientGroundColor;
             savedAmbientIntensity = RenderSettings.ambientIntensity;
             savedReflectionIntensity = RenderSettings.reflectionIntensity;
             savedXrResolutionScale = GetXrValue("eyeTextureResolutionScale");
@@ -1783,25 +1795,33 @@ namespace QuestMods
             RenderSettings.fogStartDistance = 100000f;
             RenderSettings.fogEndDistance = 100000f;
 
-            // 2. Brighter, neutral ambient so the world is not tinted cold blue.
-            RenderSettings.ambientIntensity = 1.35f;
-            RenderSettings.reflectionIntensity = 1.15f;
-            if (RenderSettings.ambientMode == UnityEngine.Rendering.AmbientMode.Flat)
-                RenderSettings.ambientLight = new Color(0.62f, 0.64f, 0.68f);
+            // 2. Lighting: three-colour ambient instead of the flat cold wash, so
+            // shadows are lit by sky colour and open ground is warm, plus a
+            // stronger reflection term and a brighter sky.
+            RenderSettings.ambientMode = UnityEngine.Rendering.AmbientMode.Trilight;
+            RenderSettings.ambientSkyColor = new Color(0.58f, 0.62f, 0.72f);
+            RenderSettings.ambientEquatorColor = new Color(0.52f, 0.50f, 0.46f);
+            RenderSettings.ambientGroundColor = new Color(0.34f, 0.31f, 0.26f);
+            RenderSettings.ambientIntensity = 1.25f;
+            RenderSettings.reflectionIntensity = 1.3f;
             Material sky = RenderSettings.skybox;
-            if (sky != null && sky.HasProperty("_Exposure")) sky.SetFloat("_Exposure", 1.25f);
+            if (sky != null && sky.HasProperty("_Exposure")) sky.SetFloat("_Exposure", 1.3f);
 
             // 3. Full texture resolution, longer LODs, better shadows and filtering.
             SetQualityValue("masterTextureLimit", 0);
             SetQualityValue("maximumLODLevel", 0);
-            SetQualityValue("lodBias", 4f);
+            SetQualityValue("lodBias", 6f);
             SetQualityValue("anisotropicFiltering", "ForceEnable");
             SetQualityValue("pixelLightCount", 8);
             SetQualityValue("antiAliasing", 4);
-            SetQualityValue("shadowDistance", 200f);
+            SetQualityValue("shadowDistance", 300f);
             SetQualityValue("shadowCascades", 4);
             SetQualityValue("shadowResolution", "VeryHigh");
-            SetQualityValue("shadowProjection", "CloseFit");
+            SetQualityValue("shadowProjection", "StableFit");
+            // Tighter cascade splits keep the near shadows sharp instead of
+            // smearing the 4 cascades evenly across the whole world.
+            SetQualityValue("shadowCascade4Split", new Vector3(0.05f, 0.15f, 0.4f));
+            SetQualityValue("shadowNearPlaneOffset", 1f);
             SetQualityValue("softParticles", 1);
             SetQualityValue("softVegetation", 1);
             SetQualityValue("realtimeReflectionProbes", 1);
@@ -1834,7 +1854,10 @@ namespace QuestMods
             SetXrValue("eyeTextureResolutionScale", graphicsSharpness[graphicsSharpIndex]);
             SetXrValue("renderViewportScale", 1f);
 
-            // 6. Far ground and foliage: the real reason distant hills go flat.
+            // 6. Sun and shadows: soft directional shadows, slightly stronger light.
+            ApplyLightBoost();
+
+            // 7. Far ground and foliage: the real reason distant hills look flat.
             ApplyTerrainBoost();
         }
 
@@ -1865,6 +1888,32 @@ namespace QuestMods
             "ssao", "underwater", "bluefilm"
         };
 
+        // Post-processing and colour grading families. Kept apart from fog and
+        // film overlays so "Keep Post FX" can leave the game's look intact.
+        private static readonly string[] graphicsPostTypes =
+        {
+            "volume", "postprocesslayer", "postprocessvolume", "postprocessprofile",
+            "colorgrading", "colorgradingcurve", "colorlookup", "coloradjustments",
+            "colorcorrectionlookup", "colorcurves", "tonemapping", "tonemapper",
+            "bloom", "vignette", "filmgrain", "grain", "chromaticaberration",
+            "whitebalance", "liftgammagain", "shadowsmidtoneshighlights",
+            "channelmixer", "screenspaceambientocclusion", "ambientocclusion",
+            "depthoffield", "motionblur", "paniniprojection", "lensdistortion"
+        };
+
+        private static readonly string[] graphicsPostFragments =
+        {
+            "postprocess", "colorgrading", "colorcorrection", "colorlookup", "tonemap",
+            "bloom", "vignette", "chromatic", "ambientocclusion", "ssao", "filmgrain"
+        };
+
+        private static bool IsPostFxType(string lowerTypeName)
+        {
+            foreach (string key in graphicsPostTypes) if (lowerTypeName == key) return true;
+            foreach (string key in graphicsPostFragments) if (lowerTypeName.Contains(key)) return true;
+            return false;
+        }
+
         private static void ScanAndDisableGraphicsExtras()
         {
             try
@@ -1880,6 +1929,7 @@ namespace QuestMods
                     foreach (string key in graphicsKillTypes) if (lower == key) { match = true; break; }
                     if (!match)
                         foreach (string key in graphicsKillFragments) if (lower.Contains(key)) { match = true; break; }
+                    if (match && prefKeepPostFx != null && prefKeepPostFx.Value && IsPostFxType(lower)) continue;
                     if (match && graphicsDisabledBehaviours.Contains(mb)) match = false;
                     if (!match) continue;
                     try
@@ -1949,6 +1999,9 @@ namespace QuestMods
                 RenderSettings.fogMode = savedFogMode;
                 RenderSettings.ambientMode = savedAmbientMode;
                 RenderSettings.ambientLight = savedAmbientLight;
+                RenderSettings.ambientSkyColor = savedAmbientSky;
+                RenderSettings.ambientEquatorColor = savedAmbientEquator;
+                RenderSettings.ambientGroundColor = savedAmbientGround;
                 RenderSettings.ambientIntensity = savedAmbientIntensity;
                 RenderSettings.reflectionIntensity = savedReflectionIntensity;
             }
@@ -1972,6 +2025,7 @@ namespace QuestMods
             {
                 try { savedSkybox.SetFloat("_Exposure", savedSkyboxExposure); } catch { }
             }
+            RestoreLights();
             RestoreTerrain();
             foreach (var kv in savedQuality) SetQualityValue(kv.Key, kv.Value);
             if (savedXrResolutionScale != null) SetXrValue("eyeTextureResolutionScale", savedXrResolutionScale);
@@ -1990,7 +2044,7 @@ namespace QuestMods
         private class TerrainSnap
         {
             public UnityEngine.Object T;
-            public object Base, MaxLod, Detail, Tree, Billboard, FullLod, Draw;
+            public Dictionary<string, object> Saved;
         }
         private static readonly List<TerrainSnap> terrainSnaps = new List<TerrainSnap>();
         private static bool terrainLogged, maxDetailLogged;
@@ -2042,6 +2096,33 @@ namespace QuestMods
         // LOD, which is why far hills look flat and blurry. Raising both keeps the
         // real terrain shader and full geometry far out, and the foliage values
         // keep grass and trees instead of bare ground.
+        // Terrain values that make distant ground read as real terrain instead of
+        // a flat low-poly sheet. heightmapPixelError is the important one: it is
+        // what makes hills faceted and "shitty" at range, and basemapDistance is
+        // kept moderate on purpose - pushing it to the horizon makes the terrain
+        // shader alias badly, which looks worse, not better.
+        private static readonly string[] terrainMembers =
+        {
+            "heightmapPixelError", "heightmapMaximumLOD", "basemapDistance",
+            "detailObjectDistance", "detailObjectDensity",
+            "treeDistance", "treeBillboardDistance", "treeMaximumFullLODCount",
+            "treeLODBiasMultiplier", "drawTreesAndFoliage"
+        };
+
+        private static readonly object[] terrainTargets =
+        {
+            1.2f,   // heightmapPixelError: smooth silhouettes, no faceted hills
+            0,      // heightmapMaximumLOD: full terrain geometry far out
+            6000f,  // basemapDistance: real terrain shader well past the near hills
+            600f,   // detailObjectDistance: rocks/grass keep rendering
+            1f,     // detailObjectDensity: full density, not thinned out
+            5000f,  // treeDistance
+            2500f,  // treeBillboardDistance
+            2000,   // treeMaximumFullLODCount: trees stay meshes, not billboards
+            2f,     // treeLODBiasMultiplier
+            true    // drawTreesAndFoliage
+        };
+
         private static void ApplyTerrainBoost()
         {
             Type terrainType = FindLoadedType("Terrain");
@@ -2052,29 +2133,22 @@ namespace QuestMods
                 foreach (UnityEngine.Object o in UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.From(terrainType)))
                 {
                     if (o == null) continue;
-                    bool known = false;
-                    foreach (TerrainSnap s in terrainSnaps) if (s.T == o) { known = true; break; }
-                    if (!known)
+                    TerrainSnap snap = null;
+                    foreach (TerrainSnap s in terrainSnaps) if (s.T == o) { snap = s; break; }
+                    if (snap == null)
                     {
-                        terrainSnaps.Add(new TerrainSnap
-                        {
-                            T = o,
-                            Base = ReadMember(o, "basemapDistance"),
-                            MaxLod = ReadMember(o, "heightmapMaximumLOD"),
-                            Detail = ReadMember(o, "detailObjectDistance"),
-                            Tree = ReadMember(o, "treeDistance"),
-                            Billboard = ReadMember(o, "treeBillboardDistance"),
-                            FullLod = ReadMember(o, "treeMaximumFullLODCount"),
-                            Draw = ReadMember(o, "drawTreesAndFoliage")
-                        });
+                        snap = new TerrainSnap { T = o, Saved = new Dictionary<string, object>() };
+                        foreach (string member in terrainMembers) snap.Saved[member] = ReadMember(o, member);
+                        terrainSnaps.Add(snap);
                     }
-                    WriteMember(o, "basemapDistance", 100000f);
-                    WriteMember(o, "heightmapMaximumLOD", 0);
-                    WriteMember(o, "detailObjectDistance", 450f);
-                    WriteMember(o, "treeDistance", 4000f);
-                    WriteMember(o, "treeBillboardDistance", 2000f);
-                    WriteMember(o, "treeMaximumFullLODCount", 1200);
-                    WriteMember(o, "drawTreesAndFoliage", true);
+                    for (int i = 0; i < terrainMembers.Length; i++)
+                        WriteMember(o, terrainMembers[i], terrainTargets[i]);
+                    try
+                    {
+                        MethodInfo flush = o.GetType().GetMethod("Flush", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                        if (flush != null) flush.Invoke(o, null);
+                    }
+                    catch { }
                     changed++;
                 }
             }
@@ -2082,7 +2156,7 @@ namespace QuestMods
             if (changed > 0 && !terrainLogged)
             {
                 terrainLogged = true;
-                MelonLogger.Msg("[Graphics] Terrain boosted on " + changed + " terrain(s): full-res far ground, more grass and trees.");
+                MelonLogger.Msg("[Graphics] Terrain boosted on " + changed + " terrain(s): smooth hills, full geometry, dense grass and trees.");
             }
         }
 
@@ -2090,17 +2164,80 @@ namespace QuestMods
         {
             foreach (TerrainSnap s in terrainSnaps)
             {
-                if (s == null || s.T == null) continue;
-                if (s.Base != null) WriteMember(s.T, "basemapDistance", s.Base);
-                if (s.MaxLod != null) WriteMember(s.T, "heightmapMaximumLOD", s.MaxLod);
-                if (s.Detail != null) WriteMember(s.T, "detailObjectDistance", s.Detail);
-                if (s.Tree != null) WriteMember(s.T, "treeDistance", s.Tree);
-                if (s.Billboard != null) WriteMember(s.T, "treeBillboardDistance", s.Billboard);
-                if (s.FullLod != null) WriteMember(s.T, "treeMaximumFullLODCount", s.FullLod);
-                if (s.Draw != null) WriteMember(s.T, "drawTreesAndFoliage", s.Draw);
+                if (s == null || s.T == null || s.Saved == null) continue;
+                foreach (var kv in s.Saved)
+                {
+                    if (kv.Value != null) WriteMember(s.T, kv.Key, kv.Value);
+                }
             }
             terrainSnaps.Clear();
             terrainLogged = false;
+        }
+
+        // --- Lights and shadows ------------------------------------------------
+        // Directional lights keep moving (day/night), so the original intensity is
+        // stored once and the boosted value is always derived from it; otherwise a
+        // periodic re-apply would keep multiplying and blow the world out.
+        private class LightSnap
+        {
+            public Light L;
+            public float Intensity;
+            public LightShadows Shadows;
+            public float ShadowStrength;
+        }
+        private static readonly List<LightSnap> lightSnaps = new List<LightSnap>();
+        private static bool lightsLogged;
+
+        private static void ApplyLightBoost()
+        {
+            int changed = 0;
+            try
+            {
+                foreach (Light light in UnityEngine.Object.FindObjectsOfType<Light>())
+                {
+                    if (light == null || light.type != LightType.Directional) continue;
+                    LightSnap snap = null;
+                    foreach (LightSnap s in lightSnaps) if (s.L == light) { snap = s; break; }
+                    if (snap == null)
+                    {
+                        snap = new LightSnap
+                        {
+                            L = light,
+                            Intensity = light.intensity,
+                            Shadows = light.shadows,
+                            ShadowStrength = light.shadowStrength
+                        };
+                        lightSnaps.Add(snap);
+                    }
+                    light.shadows = LightShadows.Soft;
+                    light.shadowStrength = 0.95f;
+                    light.intensity = snap.Intensity * 1.12f;
+                    changed++;
+                }
+            }
+            catch (Exception ex) { MelonLogger.Warning("[Graphics] lights: " + ex.Message); }
+            if (changed > 0 && !lightsLogged)
+            {
+                lightsLogged = true;
+                MelonLogger.Msg("[Graphics] Shadow/light boost on " + changed + " sun light(s): soft shadows, stronger sun.");
+            }
+        }
+
+        private static void RestoreLights()
+        {
+            foreach (LightSnap s in lightSnaps)
+            {
+                if (s == null || s.L == null) continue;
+                try
+                {
+                    s.L.intensity = s.Intensity;
+                    s.L.shadows = s.Shadows;
+                    s.L.shadowStrength = s.ShadowStrength;
+                }
+                catch { }
+            }
+            lightSnaps.Clear();
+            lightsLogged = false;
         }
 
         // Max Detail: force every LODGroup to its highest-detail mesh, so nothing
@@ -2116,11 +2253,19 @@ namespace QuestMods
             MethodInfo force = lodType.GetMethod("ForceLOD", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             if (force == null) return;
             int shown = 0;
+            PlayerController pc = PlayerController.Current;
+            Vector3 eye = pc != null ? pc.PlayerFeetPosition : Vector3.zero;
+            bool haveEye = pc != null;
             try
             {
                 foreach (UnityEngine.Object o in UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.From(lodType)))
                 {
                     if (o == null) continue;
+                    UnityEngine.Component c = o as UnityEngine.Component;
+                    if (c == null) continue;
+                    // Only objects you can actually see in detail need LOD0; forcing
+                    // it on the whole world past this range just burns frame time.
+                    if (haveEye && (c.transform.position - eye).sqrMagnitude > 500f * 500f) continue;
                     try { force.Invoke(o, new object[] { 0 }); shown++; } catch { }
                 }
             }
