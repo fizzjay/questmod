@@ -1,6 +1,7 @@
-// QuestMods 1.9.8 - wheel + wrist HUD + sight guards + player ESP.
+// QuestMods 1.9.9 - wheel + wrist HUD + sight guards + player ESP + graphics overhaul.
 // Wrist HUD: FPS plus SAFE / NOT SAFE based on nearby players and line of sight.
 // Sight guards: Disconnect / Turn Off / TP Away on sight. ESP: through-wall player highlight.
+// Graphics Overhaul: no fog, no blue film, full-res textures, long draw distance.
 // Experimental native 3D nested wheel, not a tablet or rectangular panel.
 using System;
 using System.Collections;
@@ -26,7 +27,7 @@ using MelonLoader.Utils;
 using TabletUILib;
 using UnityEngine;
 
-[assembly: MelonInfo(typeof(QuestMods.Mod), "QuestMods", "1.9.8", "you")]
+[assembly: MelonInfo(typeof(QuestMods.Mod), "QuestMods", "1.9.9", "you")]
 [assembly: MelonGame(null, null)]
 [assembly: MelonAdditionalDependencies("TabletUILib")]
 
@@ -40,7 +41,7 @@ namespace QuestMods
 
         public override void OnInitializeMelon()
         {
-            LoggerInstance.Msg("=== QuestMods 1.9.8: wheel + wrist HUD + sight guards + ESP ===");
+            LoggerInstance.Msg("=== QuestMods 1.9.9: wheel + wrist HUD + sight guards + ESP + graphics ===");
             PatchInitializers();
             GrabbyHands.Install(HarmonyInstance);
             PatchGetter(typeof(QuickAccessMenuAction), "IsDev", typeof(MenuDevPatch));
@@ -75,6 +76,7 @@ namespace QuestMods
         private static MelonPreferences_Entry<bool> prefTurnOffOnSight;
         private static MelonPreferences_Entry<bool> prefTpAwayOnSight;
         private static MelonPreferences_Entry<bool> prefPlayerEsp;
+        private static MelonPreferences_Entry<bool> prefGraphics;
         private static bool lastGrabbyPref, lastSpeedPref, lastFlyPref, lastNoclipPref, lastDurabilityPref;
 
         private void InitTabletUI()
@@ -98,6 +100,7 @@ namespace QuestMods
             prefTurnOffOnSight = category.CreateEntry("TurnOffOnSight", false, "Turn Off on Sight");
             prefTpAwayOnSight = category.CreateEntry("TpAwayOnSight", false, "TP Away on Sight");
             prefPlayerEsp = category.CreateEntry("PlayerEsp", false, "Player ESP (Thru Walls)");
+            prefGraphics = category.CreateEntry("GraphicsOverhaul", false, "Graphics Overhaul");
 
             prefGrabbyHands.Value = false;
             prefSuperSpeed.Value = false;
@@ -114,6 +117,7 @@ namespace QuestMods
             prefTurnOffOnSight.Value = false;
             prefTpAwayOnSight.Value = false;
             prefPlayerEsp.Value = false;
+            prefGraphics.Value = false;
 
             InstallExtraPatches(HarmonyInstance);
 
@@ -153,6 +157,9 @@ namespace QuestMods
                 .Toggle("Turn Off on Sight", prefTurnOffOnSight)
                 .Toggle("TP Away on Sight", prefTpAwayOnSight)
                 .Toggle("Player ESP (Thru Walls)", prefPlayerEsp)
+                .Toggle("Graphics Overhaul", prefGraphics)
+                .Button("Overhaul View: " + graphicsRanges[graphicsRangeIndex] + "m", () => CycleGraphicsRange())
+                .Button("Overhaul Sharp: " + GraphicsSharpLabel(), () => CycleGraphicsSharp())
                 .Button("Bag Looking", () => ToggleStorage());
         }
 
@@ -163,6 +170,9 @@ namespace QuestMods
                 .Button("Turn Off on Sight: ALL mods off until clear", () => { })
                 .Button("TP Away on Sight: warp away when seen", () => { })
                 .Button("Player ESP: full-body highlight thru walls", () => { })
+                .Button("Graphics Overhaul: no fog, no blue film", () => { })
+                .Button("Overhaul View: camera draw distance", () => { })
+                .Button("Overhaul Sharp: headset render scale", () => { })
                 .Button("Wrist HUD: FPS + SAFE / NOT SAFE", () => { })
                 .Button("Safe Range: how far 'around you' is", () => { })
                 .Button("Seen = clear sight + looking at you", () => { })
@@ -231,6 +241,12 @@ namespace QuestMods
                 ApplyDevLight(lastDevLightPref);
             }
 
+            if (prefGraphics != null && prefGraphics.Value != graphicsAppliedPref)
+            {
+                graphicsAppliedPref = prefGraphics.Value;
+                ApplyGraphicsOverhaul(graphicsAppliedPref);
+            }
+
             if (prefDurability != null)
             {
                 if (prefDurability.Value != lastDurabilityPref)
@@ -260,6 +276,8 @@ namespace QuestMods
             catch (Exception ex) { MelonLogger.Warning("[WristHUD] tick failed: " + ex.Message); }
             try { TickPlayerEsp(); }
             catch (Exception ex) { MelonLogger.Warning("[PlayerESP] tick failed: " + ex.Message); }
+            try { TickGraphicsOverhaul(); }
+            catch (Exception ex) { MelonLogger.Warning("[Graphics] tick failed: " + ex.Message); }
         }
 
         private static void ApplySuperSpeed(bool enabled)
@@ -1197,6 +1215,7 @@ namespace QuestMods
             yield return prefDevLight;
             yield return prefMakePearl;
             yield return prefPlayerEsp;
+            yield return prefGraphics;
         }
 
         // Runs every frame from SyncTabletToggles, so a panic cannot be undone
@@ -1345,8 +1364,11 @@ namespace QuestMods
             return false;
         }
 
+        private static readonly Dictionary<string, Type> loadedTypeCache = new Dictionary<string, Type>();
+
         private static Type FindLoadedType(string simpleName)
         {
+            if (loadedTypeCache.TryGetValue(simpleName, out Type cached)) return cached;
             foreach (Assembly a in AppDomain.CurrentDomain.GetAssemblies())
             {
                 Type[] types;
@@ -1354,7 +1376,12 @@ namespace QuestMods
                 catch (ReflectionTypeLoadException ex) { types = ex.Types; }
                 catch { continue; }
                 if (types == null) continue;
-                foreach (Type t in types) if (t != null && t.Name == simpleName) return t;
+                foreach (Type t in types)
+                {
+                    if (t == null || t.Name != simpleName) continue;
+                    loadedTypeCache[simpleName] = t;
+                    return t;
+                }
             }
             return null;
         }
@@ -1498,6 +1525,431 @@ namespace QuestMods
             m = new EspMarker { Root = root, Text = text, Typed = typed, Cached = null };
             espMarkers[ptr] = m;
             return m;
+        }
+
+        // --- Graphics Overhaul: no fog, no blue film, clean long-view image ----
+        // Client-side visuals only. Every value changed here is snapshotted and
+        // restored when the toggle is turned off or Escape turns all mods off.
+        private static readonly int[] graphicsRanges = { 1500, 2500, 4000 };
+        private static readonly float[] graphicsSharpness = { 1f, 1.15f, 1.3f, 1.5f };
+        private static readonly string[] graphicsQualityKeys =
+        {
+            "masterTextureLimit", "maximumLODLevel", "lodBias", "anisotropicFiltering",
+            "pixelLightCount", "antiAliasing", "shadowDistance", "shadowCascades",
+            "shadowResolution", "shadowProjection", "softParticles", "softVegetation",
+            "realtimeReflectionProbes", "billboardsFaceCameraPosition",
+            "particleRaycastBudget", "skinWeights"
+        };
+        private static int graphicsRangeIndex = 1;
+        private static int graphicsSharpIndex;
+        private static bool graphicsApplied, graphicsAppliedPref, graphicsWarned;
+        private static float graphicsNextReapply;
+
+        private static bool savedFog;
+        private static float savedFogDensity, savedFogStart, savedFogEnd;
+        private static Color savedFogColor;
+        private static FogMode savedFogMode;
+        private static UnityEngine.Rendering.AmbientMode savedAmbientMode;
+        private static Color savedAmbientLight;
+        private static float savedAmbientIntensity, savedReflectionIntensity;
+        private static object savedXrResolutionScale, savedXrViewportScale;
+        private static Material savedSkybox;
+        private static float savedSkyboxExposure;
+        private static bool savedSkyboxExposureOk;
+
+        private class CamSnap
+        {
+            public Camera Cam;
+            public float Far, Near;
+            public bool Hdr, Msaa;
+            public CameraClearFlags Flags;
+        }
+        private static readonly List<CamSnap> camSnaps = new List<CamSnap>();
+        private static readonly List<Behaviour> graphicsDisabledBehaviours = new List<Behaviour>();
+        private static readonly List<Renderer> graphicsDisabledRenderers = new List<Renderer>();
+        private static readonly Dictionary<string, object> savedQuality = new Dictionary<string, object>();
+
+        private static string GraphicsSharpLabel()
+        {
+            return graphicsSharpness[graphicsSharpIndex].ToString("0.00") + "x";
+        }
+
+        private static void CycleGraphicsSharp()
+        {
+            graphicsSharpIndex = (graphicsSharpIndex + 1) % graphicsSharpness.Length;
+            if (graphicsApplied) SetXrValue("eyeTextureResolutionScale", graphicsSharpness[graphicsSharpIndex]);
+            MelonLogger.Msg("[Graphics] Render scale: " + GraphicsSharpLabel());
+        }
+
+        private static void CycleGraphicsRange()
+        {
+            graphicsRangeIndex = (graphicsRangeIndex + 1) % graphicsRanges.Length;
+            if (graphicsApplied) ApplyGraphicsCore();
+            MelonLogger.Msg("[Graphics] Draw distance: " + graphicsRanges[graphicsRangeIndex] + "m");
+        }
+
+        private static void ApplyGraphicsOverhaul(bool on)
+        {
+            try
+            {
+                if (on)
+                {
+                    if (!graphicsApplied)
+                    {
+                        CaptureGraphicsSnapshot();
+                        graphicsApplied = true;
+                    }
+                    ApplyGraphicsCore();
+                    ScanAndDisableGraphicsExtras();
+                    MelonLogger.Msg("[Graphics] Overhaul ON: fog off, blue film off, full textures, " +
+                        graphicsRanges[graphicsRangeIndex] + "m view, " + GraphicsSharpLabel() + " render scale.");
+                }
+                else if (graphicsApplied)
+                {
+                    RestoreGraphics();
+                    graphicsApplied = false;
+                    MelonLogger.Msg("[Graphics] Overhaul OFF: original visuals restored.");
+                }
+            }
+            catch (Exception ex)
+            {
+                if (!graphicsWarned) { graphicsWarned = true; MelonLogger.Warning("[Graphics] apply failed: " + ex.Message); }
+            }
+        }
+
+        // Re-applied a few times a second so the game's own scene scripts cannot
+        // quietly switch fog, texture limits or the far plane back on.
+        private static void TickGraphicsOverhaul()
+        {
+            if (prefGraphics == null || !prefGraphics.Value) return;
+            if (!graphicsApplied) { ApplyGraphicsOverhaul(true); return; }
+            if (Time.time < graphicsNextReapply) return;
+            graphicsNextReapply = Time.time + 2f;
+            ApplyGraphicsCore();
+        }
+
+        public static void GraphicsSceneLoaded()
+        {
+            // Old scene objects are gone; forget them but keep the saved values.
+            graphicsDisabledBehaviours.Clear();
+            graphicsDisabledRenderers.Clear();
+            camSnaps.Clear();
+            graphicsNextReapply = 0f;
+            if (prefGraphics != null && prefGraphics.Value)
+            {
+                CaptureCameraSnapshots();
+                ApplyGraphicsCore();
+                ScanAndDisableGraphicsExtras();
+            }
+        }
+
+        private static PropertyInfo QualityProp(string name)
+        {
+            try { return typeof(QualitySettings).GetProperty(name, BindingFlags.Public | BindingFlags.Static); }
+            catch { return null; }
+        }
+
+        private static bool TryReadQuality(string name, out object value)
+        {
+            value = null;
+            PropertyInfo pi = QualityProp(name);
+            if (pi == null || !pi.CanRead) return false;
+            try { value = pi.GetValue(null); return value != null; }
+            catch { return false; }
+        }
+
+        private static void SetQualityValue(string name, object value)
+        {
+            PropertyInfo pi = QualityProp(name);
+            if (pi == null || !pi.CanWrite) return;
+            try
+            {
+                Type pt = pi.PropertyType;
+                object v = value;
+                if (pt.IsEnum)
+                {
+                    if (value is string sname) v = Enum.Parse(pt, sname, true);
+                    else if (value is Enum) v = value;
+                    else v = Enum.ToObject(pt, Convert.ToInt32(value));
+                }
+                else if (v != null && v.GetType() != pt) v = Convert.ChangeType(v, pt);
+                pi.SetValue(null, v);
+            }
+            catch (Exception ex) { MelonLogger.Warning("[Graphics] " + name + ": " + ex.Message); }
+        }
+
+        private static object GetXrValue(string name)
+        {
+            Type t = FindLoadedType("XRSettings");
+            if (t == null) return null;
+            PropertyInfo pi = t.GetProperty(name, BindingFlags.Public | BindingFlags.Static);
+            if (pi == null || !pi.CanRead) return null;
+            try { return pi.GetValue(null); } catch { return null; }
+        }
+
+        private static void SetXrValue(string name, object value)
+        {
+            try
+            {
+                Type t = FindLoadedType("XRSettings");
+                if (t == null) return;
+                PropertyInfo pi = t.GetProperty(name, BindingFlags.Public | BindingFlags.Static);
+                if (pi == null || !pi.CanWrite) return;
+                object v = value;
+                if (v != null && v.GetType() != pi.PropertyType) v = Convert.ChangeType(v, pi.PropertyType);
+                pi.SetValue(null, v);
+            }
+            catch (Exception ex) { MelonLogger.Warning("[Graphics] XR " + name + ": " + ex.Message); }
+        }
+
+        private static void CaptureCameraSnapshots()
+        {
+            foreach (Camera cam in Camera.allCameras)
+            {
+                if (cam == null) continue;
+                bool known = false;
+                foreach (CamSnap existing in camSnaps) if (existing.Cam == cam) { known = true; break; }
+                if (known) continue;
+                camSnaps.Add(new CamSnap
+                {
+                    Cam = cam,
+                    Far = cam.farClipPlane,
+                    Near = cam.nearClipPlane,
+                    Hdr = cam.allowHDR,
+                    Msaa = cam.allowMSAA,
+                    Flags = cam.clearFlags
+                });
+            }
+        }
+
+        private static void CaptureGraphicsSnapshot()
+        {
+            savedFog = RenderSettings.fog;
+            savedFogDensity = RenderSettings.fogDensity;
+            savedFogStart = RenderSettings.fogStartDistance;
+            savedFogEnd = RenderSettings.fogEndDistance;
+            savedFogColor = RenderSettings.fogColor;
+            savedFogMode = RenderSettings.fogMode;
+            savedAmbientMode = RenderSettings.ambientMode;
+            savedAmbientLight = RenderSettings.ambientLight;
+            savedAmbientIntensity = RenderSettings.ambientIntensity;
+            savedReflectionIntensity = RenderSettings.reflectionIntensity;
+            savedXrResolutionScale = GetXrValue("eyeTextureResolutionScale");
+            savedXrViewportScale = GetXrValue("renderViewportScale");
+            savedSkybox = RenderSettings.skybox;
+            savedSkyboxExposureOk = false;
+            if (savedSkybox != null && savedSkybox.HasProperty("_Exposure"))
+            {
+                try { savedSkyboxExposure = savedSkybox.GetFloat("_Exposure"); savedSkyboxExposureOk = true; }
+                catch { savedSkyboxExposureOk = false; }
+            }
+
+            savedQuality.Clear();
+            foreach (string key in graphicsQualityKeys)
+            {
+                object v;
+                if (TryReadQuality(key, out v)) savedQuality[key] = v;
+            }
+            CaptureCameraSnapshots();
+        }
+
+        private static void ApplyGraphicsCore()
+        {
+            // 1. No fog: this alone removes the milky blue haze in the distance.
+            RenderSettings.fog = false;
+            RenderSettings.fogMode = FogMode.Linear;
+            RenderSettings.fogDensity = 0f;
+            RenderSettings.fogStartDistance = 100000f;
+            RenderSettings.fogEndDistance = 100000f;
+
+            // 2. Brighter, neutral ambient so the world is not tinted cold blue.
+            RenderSettings.ambientIntensity = 1.35f;
+            RenderSettings.reflectionIntensity = 1.15f;
+            if (RenderSettings.ambientMode == UnityEngine.Rendering.AmbientMode.Flat)
+                RenderSettings.ambientLight = new Color(0.62f, 0.64f, 0.68f);
+            Material sky = RenderSettings.skybox;
+            if (sky != null && sky.HasProperty("_Exposure")) sky.SetFloat("_Exposure", 1.25f);
+
+            // 3. Full texture resolution, longer LODs, better shadows and filtering.
+            SetQualityValue("masterTextureLimit", 0);
+            SetQualityValue("maximumLODLevel", 0);
+            SetQualityValue("lodBias", 2.5f);
+            SetQualityValue("anisotropicFiltering", "ForceEnable");
+            SetQualityValue("pixelLightCount", 8);
+            SetQualityValue("antiAliasing", 4);
+            SetQualityValue("shadowDistance", 160f);
+            SetQualityValue("shadowCascades", 4);
+            SetQualityValue("shadowResolution", "VeryHigh");
+            SetQualityValue("shadowProjection", "CloseFit");
+            SetQualityValue("softParticles", 1);
+            SetQualityValue("softVegetation", 1);
+            SetQualityValue("realtimeReflectionProbes", 1);
+            SetQualityValue("billboardsFaceCameraPosition", 1);
+            SetQualityValue("particleRaycastBudget", 4096);
+            SetQualityValue("skinWeights", "FourBones");
+
+            // 4. Camera: HDR + MSAA where available and a far plane past the fog.
+            int far = graphicsRanges[graphicsRangeIndex];
+            foreach (Camera cam in Camera.allCameras)
+            {
+                if (cam == null || cam.cameraType != CameraType.Game) continue;
+                try
+                {
+                    cam.allowHDR = true;
+                    cam.allowMSAA = true;
+                    if (cam.farClipPlane < far) cam.farClipPlane = far;
+                    if (cam.clearFlags == CameraClearFlags.SolidColor) cam.clearFlags = CameraClearFlags.Skybox;
+                }
+                catch (Exception ex) { MelonLogger.Warning("[Graphics] camera: " + ex.Message); }
+            }
+
+            // 5. Headset render scale (supersampling) through XR, by reflection.
+            SetXrValue("eyeTextureResolutionScale", graphicsSharpness[graphicsSharpIndex]);
+            SetXrValue("renderViewportScale", 1f);
+        }
+
+        // Post-processing / colour grading / film overlays and distance fog
+        // geometry. Matched by component type name so nothing game-logic related
+        // is touched; everything disabled here is re-enabled on toggle off.
+        private static readonly string[] graphicsKillTypes =
+        {
+            "postprocesslayer", "postprocessvolume", "postprocessprofile",
+            "postprocesslayerphysicalcamera", "volume",
+            "colorgrading", "colorgradingcurve", "colorlookup", "coloradjustments",
+            "colorcorrectionlookup", "colorcurves", "tonemapping", "vignette",
+            "filmgrain", "grain", "bloom", "chromaticaberration", "whitebalance",
+            "liftgammagain", "shadowsmidtoneshighlights", "channelmixer",
+            "screenspaceambientocclusion", "ambientocclusion", "depthoffield",
+            "motionblur", "paniniprojection", "lensdistortion", "screeneffect",
+            "screenfilter", "screenoverlay", "screenfade", "bluefilm", "bluetint",
+            "underwater", "fogvolume", "volumetricfog", "distancefog", "heightfog",
+            "weatherfog", "blurscreen"
+        };
+
+        // Distinctive fragments that already identify a visual effect; kept short
+        // on purpose so gameplay systems (item tinting, etc.) are never matched.
+        private static readonly string[] graphicsKillFragments =
+        {
+            "fog", "postprocess", "colorgrading", "colorcorrection", "colorlookup",
+            "tonemap", "vignette", "bloom", "chromatic", "ambientocclusion",
+            "ssao", "underwater", "bluefilm"
+        };
+
+        private static void ScanAndDisableGraphicsExtras()
+        {
+            try
+            {
+                MonoBehaviour[] behaviours = UnityEngine.Object.FindObjectsOfType<MonoBehaviour>();
+                foreach (MonoBehaviour mb in behaviours)
+                {
+                    if (mb == null || !mb.enabled) continue;
+                    string typeName = mb.GetType().Name;
+                    if (string.IsNullOrEmpty(typeName)) continue;
+                    string lower = typeName.ToLowerInvariant();
+                    bool match = false;
+                    foreach (string key in graphicsKillTypes) if (lower == key) { match = true; break; }
+                    if (!match)
+                        foreach (string key in graphicsKillFragments) if (lower.Contains(key)) { match = true; break; }
+                    if (match && graphicsDisabledBehaviours.Contains(mb)) match = false;
+                    if (!match) continue;
+                    try
+                    {
+                        mb.enabled = false;
+                        graphicsDisabledBehaviours.Add(mb);
+                        MelonLogger.Msg("[Graphics] Disabled " + typeName + " on '" + mb.gameObject.name + "'.");
+                    }
+                    catch { }
+                }
+            }
+            catch (Exception ex) { MelonLogger.Warning("[Graphics] volume scan: " + ex.Message); }
+
+            // Blue film / tint / fade quads live in the camera hierarchy.
+            try
+            {
+                foreach (Camera cam in Camera.allCameras)
+                {
+                    if (cam == null) continue;
+                    foreach (Renderer r in cam.GetComponentsInChildren<Renderer>(true))
+                        DisableGraphicsRenderer(r);
+                }
+            }
+            catch (Exception ex) { MelonLogger.Warning("[Graphics] camera overlays: " + ex.Message); }
+
+            // Distance-fog / mist particles that are geometry, not scripts.
+            try
+            {
+                foreach (ParticleSystemRenderer psr in UnityEngine.Object.FindObjectsOfType<ParticleSystemRenderer>())
+                    DisableGraphicsRenderer(psr);
+            }
+            catch (Exception ex) { MelonLogger.Warning("[Graphics] fog particles: " + ex.Message); }
+        }
+
+        private static readonly string[] graphicsKillRendererNames = { "fog", "mist", "haze", "bluefilm", "bluetint", "tint", "vignette", "screenfade", "underwater", "overlay" };
+
+        private static void DisableGraphicsRenderer(Renderer r)
+        {
+            if (r == null || !r.enabled) return;
+            if (graphicsDisabledRenderers.Contains(r)) return;
+            string label = r.gameObject.name;
+            if (string.IsNullOrEmpty(label)) return;
+            string lower = label.ToLowerInvariant();
+            bool match = false;
+            foreach (string key in graphicsKillRendererNames) if (lower.Contains(key)) { match = true; break; }
+            if (!match) return;
+            // Never touch our own visuals or a real player's body.
+            if (lower.StartsWith("questmods_")) return;
+            try
+            {
+                r.enabled = false;
+                graphicsDisabledRenderers.Add(r);
+                MelonLogger.Msg("[Graphics] Hid overlay renderer '" + label + "'.");
+            }
+            catch { }
+        }
+
+        private static void RestoreGraphics()
+        {
+            try
+            {
+                RenderSettings.fog = savedFog;
+                RenderSettings.fogDensity = savedFogDensity;
+                RenderSettings.fogStartDistance = savedFogStart;
+                RenderSettings.fogEndDistance = savedFogEnd;
+                RenderSettings.fogColor = savedFogColor;
+                RenderSettings.fogMode = savedFogMode;
+                RenderSettings.ambientMode = savedAmbientMode;
+                RenderSettings.ambientLight = savedAmbientLight;
+                RenderSettings.ambientIntensity = savedAmbientIntensity;
+                RenderSettings.reflectionIntensity = savedReflectionIntensity;
+            }
+            catch (Exception ex) { MelonLogger.Warning("[Graphics] restore world: " + ex.Message); }
+
+            foreach (CamSnap snap in camSnaps)
+            {
+                if (snap == null || snap.Cam == null) continue;
+                try
+                {
+                    snap.Cam.farClipPlane = snap.Far;
+                    snap.Cam.nearClipPlane = snap.Near;
+                    snap.Cam.allowHDR = snap.Hdr;
+                    snap.Cam.allowMSAA = snap.Msaa;
+                    snap.Cam.clearFlags = snap.Flags;
+                }
+                catch { }
+            }
+            if (savedSkyboxExposureOk && savedSkybox != null)
+            {
+                try { savedSkybox.SetFloat("_Exposure", savedSkyboxExposure); } catch { }
+            }
+            foreach (var kv in savedQuality) SetQualityValue(kv.Key, kv.Value);
+            if (savedXrResolutionScale != null) SetXrValue("eyeTextureResolutionScale", savedXrResolutionScale);
+            if (savedXrViewportScale != null) SetXrValue("renderViewportScale", savedXrViewportScale);
+
+            foreach (Behaviour b in graphicsDisabledBehaviours) { if (b != null) { try { b.enabled = true; } catch { } } }
+            foreach (Renderer r in graphicsDisabledRenderers) { if (r != null) { try { r.enabled = true; } catch { } } }
+            graphicsDisabledBehaviours.Clear();
+            graphicsDisabledRenderers.Clear();
+            camSnaps.Clear();
         }
 
         private static void OpenPlayerTPs()
@@ -2433,6 +2885,7 @@ namespace QuestMods
             GrabbyHands.SceneLoaded();
             WristHudSceneLoaded();
             EspSceneLoaded();
+            GraphicsSceneLoaded();
             LoggerInstance.Msg($"Scene loaded: '{sceneName}' ({buildIndex}). {Counts()}");
             try { TabletProbe.SceneLoaded(buildIndex, sceneName); DevWheelBridge.SceneLoaded(); }
             catch (Exception ex) { LoggerInstance.Warning("Tablet probe scene event: " + ex.Message); }
