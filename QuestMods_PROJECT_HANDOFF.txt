@@ -1,8 +1,8 @@
-QUESTMODS PROJECT HANDOFF
-========================
+HARMONY CLIENT PROJECT HANDOFF
+==============================
 Prepared from the project conversation and the source files available in the workspace.
 Date: 2026-11-04
-Updated: 2026-11-20 (1.9.7 wrist HUD; 1.9.8 sight guards + ESP; 1.9.9 graphics overhaul; 1.9.10/1.9.11 compile fixes; 1.9.12 far detail; 1.9.13 terrain/shadows/lighting)
+Updated: 2026-11-20 (1.9.7 wrist HUD; 1.9.8 sight guards + ESP; 1.9.9 graphics overhaul; 1.9.10/1.9.11 compile fixes; 1.9.12 far detail; 1.9.13 terrain/shadows/lighting; 2.0.0 renamed to Harmony Client + sky + P-Noclip)
 
 PURPOSE OF THIS FILE
 --------------------
@@ -14,7 +14,8 @@ Latest source: Class1.cs (QuestMods 1.9.7, includes the wrist HUD described belo
 Latest version actually tested by the user: Questmods_1.9.5.cs
 Status of 1.9.6: produced and statically checked for balanced delimiters only. It has NOT been compiled by the assistant or tested on the Quest. Do not describe it as verified or working on all slots.
 Status of 1.9.7: adds the wrist FPS / SAFE / NOT SAFE display. The user reported it works on their Quest.
-Status of 1.9.13 (current): the user said the 1.9.12 look was "meh, terrain looks shitty" and that far objects and shadows/lighting needed real work, so 1.9.13 reworks the far-detail and lighting pass: terrain heightmapPixelError 1.2 + moderate basemapDistance (6000, NOT 100000), dense detail/trees, soft directional shadows with tighter cascades, three-colour ambient, sun intensity +12%, lodBias 6, and Max Detail (LOD 0) now defaults ON but distance-limited to 500m. New "Keep Post FX" toggle lets the game's grading/bloom survive while fog and blue-film overlays are still stripped. Not compiled or tested here.
+Status of 2.0.0 (current): the mod is renamed Harmony Client and adds the sky (3D stars + planets), the forearm display, P-Noclip, the purple tablet theme attempt, the Make Day fix and the night look. Not compiled or tested here.
+Status of 1.9.13: the user said the 1.9.12 look was "meh, terrain looks shitty" and that far objects and shadows/lighting needed real work, so 1.9.13 reworks the far-detail and lighting pass: terrain heightmapPixelError 1.2 + moderate basemapDistance (6000, NOT 100000), dense detail/trees, soft directional shadows with tighter cascades, three-colour ambient, sun intensity +12%, lodBias 6, and Max Detail (LOD 0) now defaults ON but distance-limited to 500m. New "Keep Post FX" toggle lets the game's grading/bloom survive while fog and blue-film overlays are still stripped. Not compiled or tested here.
 Status of 1.9.12: 1.9.11 plus far-detail work: 4000m default view, camera occlusion culling off, terrain basemap/heightmap fixed so distant ground keeps real detail, streaming mipmaps off, 9x anisotropy, and a separate "Max Detail (LOD 0)" toggle. Not compiled or tested here.
 Status of 1.9.11: 1.9.10 plus the Il2CppSystem.Type fix in MakeDay (see the compile-fix section).
 Status of 1.9.10: 1.9.9 with the compiler errors the user reported fixed (DayTimeManager, ParticleSystemRenderer, bare Il2CppType, unused GrabbyHands counters). Not compiled here; the user compiles in their own Unity/Quest project.
@@ -87,6 +88,26 @@ User feedback on 1.9.12: "meh terrain looks shitty and also far objects just go 
 
 
 Known trade-offs / things to verify on-device: full-res textures + 200m shadows + a 4000m far plane + occlusion culling off cost GPU time (and the extra geometry is the single biggest cost), so watch the wrist FPS readout and lower "Overhaul Sharp" first, then "Overhaul View", if it drops, so watch the wrist FPS readout and lower "Overhaul Sharp" first if it drops; disabling the global post-process Volume removes bloom as well as the blue tint (ask for a sub-toggle if bloom should stay); "antiAliasing" is usually fixed at startup on Quest and may be ignored; if a wanted visual effect is disabled by the name scan, its "[Graphics] Disabled ..." log line names it.
+
+RENAME TO HARMONY CLIENT (2.0.0)
+--------------------------------
+Every "QuestMods" identifier is now "HarmonyClient":
+- namespace QuestMods -> HarmonyClient; [assembly: MelonInfo(..., "Harmony Client", "2.0.0", ...)]
+- MelonPreferences category key "QuestMods"/"Quest Mods" -> "HarmonyClient"/"Harmony Client" (this resets saved toggles once)
+- tablet bubble "harmony client" with icon "HC"; page title "HARMONY CLIENT"; radial wheel entry "Harmony Client"
+- generated object names HarmonyClient_* (WristHUD, Star, Planet, Sky, ESPMarker, ...); the IsModObject() prefix check was renamed with them, so they still exclude each other from sight raycasts
+- log tags [HarmonyClient] / [HarmonyClientMenu]
+The file is still Class1.cs because the user's own project compiles this single file. If their project references the old namespace anywhere (a loader entry, another partial file), that reference must be renamed to HarmonyClient.Mod too.
+
+2.0.0 FEATURES
+--------------
+- Arm display: the wrist HUD is now an ARM display. wristPoses holds eight presets (Forearm A/B, Forearm Hi/Lo, Forearm In/Out, Wrist Back, Flat). The forearm presets move the text up the controller transform (y 0.06-0.115, z -0.02 to -0.04) and roll it 90 degrees on Z so the lines run sideways along the forearm and sit flat against it. Default is "Forearm A". The tablet button is "Arm Display: <pose>". FPS and info lines are purple (0.78,0.45,1.0 and 0.58,0.32,0.92); only SAFE / NOT SAFE / SCANNING keep their green/red/yellow.
+- Sky (part of Graphics Overhaul): 220 star quads plus 3 planet spheres on a HarmonyClient_Sky root, placed at 72% of the camera far plane inside a 600-3200m clamp, above the horizon, seeded by System.Random(4711) so the constellation is stable. The root follows the camera every frame (so the stars never get closer) and rotates 0.5 deg/s. Stars use Sprites/Default (double sided, ZWrite off) so they are occluded by terrain but visible in the sky; planets use Unlit/Color. All colliders destroyed, shadows off. Stars are hidden during the day and shown at night using GameTimeManager.IsNight read by reflection; if that flag cannot be read the stars stay visible.
+- Night look: when IsNight is true the overhaul raises reflectionIntensity to 1.7, skybox exposure to 1.55 and uses a deep blue Trilight ambient instead of the daylight one.
+- Make Day fix: DayTimeManager fields are private, so ApplyMakeDay() sets isUpdatingDaytime to false (property first, then field), calls UpdateRotation(0.25f, 0f) and UpdateAmbience(), and pushes GameTimeManager.IsNight to false. The override is held for 10 seconds by TickMakeDayLock() because the server re-syncs the fixed-daytime flag, which is why the old one-shot version appeared not to work. The draw-distance work no longer overwrites the game's ambient when a DayTimeManager exists (HasGameAtmosphere()), which was the other reason Make Day looked broken.
+- P-Noclip: pref PlayerNoclip, "P-Noclip (through players)". It walks the local PlayerController's colliders against every other player's colliders and calls Physics.IgnoreCollision(a, b, true) in both directions of the pair, refreshed once a second so new players are covered. Terrain, buildings and props keep their collisions, and the existing layer-based Noclip toggle is untouched. Turning it off calls the same walk with false.
+- Purple tablet: ApplyTabletTheme() scans the TabletUILib assembly (and live tablet MonoBehaviours) for any Color member whose name mentions color/colour/accent/theme/tint and sets it to (0.55,0.25,0.95). If TabletUILib exposes no such hook it logs that and leaves the tablet alone - there is no documented theme API, so this is best effort, not a guarantee.
+- P-Noclip and the graphics/detail toggles are all part of the "Turn Off on Sight" panic set.
 
 PROJECT GOAL AND USER REQUIREMENTS
 ----------------------------------

@@ -1,4 +1,4 @@
-// QuestMods 1.9.13 - wheel + wrist HUD + sight guards + player ESP + graphics overhaul.
+// Harmony Client 2.0.0 - wheel, HUD, sight guards, ESP, graphics overhaul, sky, P-Noclip.
 // Wrist HUD: FPS plus SAFE / NOT SAFE based on nearby players and line of sight.
 // Sight guards: Disconnect / Turn Off / TP Away on sight. ESP: through-wall player highlight.
 // Graphics Overhaul: no fog, no blue film, full-res textures, long draw distance.
@@ -27,11 +27,11 @@ using MelonLoader.Utils;
 using TabletUILib;
 using UnityEngine;
 
-[assembly: MelonInfo(typeof(QuestMods.Mod), "QuestMods", "1.9.13", "you")]
+[assembly: MelonInfo(typeof(HarmonyClient.Mod), "Harmony Client", "2.0.0", "you")]
 [assembly: MelonGame(null, null)]
 [assembly: MelonAdditionalDependencies("TabletUILib")]
 
-namespace QuestMods
+namespace HarmonyClient
 {
     public class Mod : MelonMod
     {
@@ -41,7 +41,7 @@ namespace QuestMods
 
         public override void OnInitializeMelon()
         {
-            LoggerInstance.Msg("=== QuestMods 1.9.13: wheel + wrist HUD + sight guards + ESP + graphics ===");
+            LoggerInstance.Msg("=== Harmony Client 2.0.0 ===");
             PatchInitializers();
             GrabbyHands.Install(HarmonyInstance);
             PatchGetter(typeof(QuickAccessMenuAction), "IsDev", typeof(MenuDevPatch));
@@ -79,12 +79,14 @@ namespace QuestMods
         private static MelonPreferences_Entry<bool> prefGraphics;
         private static MelonPreferences_Entry<bool> prefMaxDetail;
         private static MelonPreferences_Entry<bool> prefKeepPostFx;
+        private static MelonPreferences_Entry<bool> prefPlayerNoclip;
+        private static bool lastPlayerNoclipPref;
         private static bool lastMaxDetailPref;
         private static bool lastGrabbyPref, lastSpeedPref, lastFlyPref, lastNoclipPref, lastDurabilityPref;
 
         private void InitTabletUI()
         {
-            var category = MelonPreferences.CreateCategory("QuestMods", "Quest Mods");
+            var category = MelonPreferences.CreateCategory("HarmonyClient", "Harmony Client");
             prefGrabbyHands = category.CreateEntry("GrabbyHands", false, "Grabby Hands");
             prefSuperSpeed = category.CreateEntry("SuperSpeed", false, "Super Speed (5x)");
             prefFly = category.CreateEntry("Fly", false, "Fly (Debug Movement)");
@@ -108,6 +110,9 @@ namespace QuestMods
             // OFF = remove the colour grading that causes the blue film.
             // ON = keep the game post FX (bloom/contrast) and only strip fog overlays.
             prefKeepPostFx = category.CreateEntry("KeepPostFx", false, "Keep Post FX");
+            // P-Noclip only removes collisions with other PLAYERS; terrain and
+            // the world still stop you. The old layer-based Noclip is untouched.
+            prefPlayerNoclip = category.CreateEntry("PlayerNoclip", false, "P-Noclip (No Player Hit)");
 
             prefGrabbyHands.Value = false;
             prefSuperSpeed.Value = false;
@@ -127,22 +132,25 @@ namespace QuestMods
             prefGraphics.Value = false;
             prefMaxDetail.Value = true;
             prefKeepPostFx.Value = false;
+            prefPlayerNoclip.Value = false;
 
             InstallExtraPatches(HarmonyInstance);
 
-            TabletUI.AddBubble("quest mods", "QM")
+            TabletUI.AddBubble("harmony client", "HC")
                 .App("tablet", "TAB", BuildTabletPage)
                 .App("tps", "TP", BuildPlayerTPsPage)
                 .App("customs", "SAV", BuildCustomTPsPage)
                 .App("caves", "CAV", BuildCavesPage)
                 .App("info", "INFO", BuildSightHelpPage);
 
-            LoggerInstance.Msg("[TabletUI] Registered 'quest mods' bubble with tablet app.");
+            LoggerInstance.Msg("[TabletUI] Registered 'harmony client' bubble with tablet app.");
+            ApplyTabletTheme();
         }
 
         private static Page BuildTabletPage()
         {
-            return new Page("QUEST MODS", "Toggles & Actions")
+            ApplyTabletTheme();
+            return new Page("HARMONY CLIENT", "Toggles & Actions")
                 .Toggle("Grabby Hands", prefGrabbyHands)
                 .Toggle("Super Speed (5x)", prefSuperSpeed)
                 .Toggle("Fly", prefFly)
@@ -161,7 +169,7 @@ namespace QuestMods
                 .Toggle("Wrist HUD (FPS/Safe)", prefWristHud)
                 .Button("Safe Range: " + wristRange + "m", () => CycleWristRange())
                 .Button("Wrist: " + (wristSideRight ? "RIGHT" : "LEFT"), () => CycleWristSide())
-                .Button("Wrist Pose: " + WristPoseLabel(), () => CycleWristPose())
+                .Button("Arm Display: " + WristPoseLabel(), () => CycleWristPose())
                 .Toggle("Disconnect on Sight", prefDisconnectOnSight)
                 .Toggle("Turn Off on Sight", prefTurnOffOnSight)
                 .Toggle("TP Away on Sight", prefTpAwayOnSight)
@@ -171,6 +179,7 @@ namespace QuestMods
                 .Button("Overhaul Sharp: " + GraphicsSharpLabel(), () => CycleGraphicsSharp())
                 .Toggle("Max Detail (LOD 0)", prefMaxDetail)
                 .Toggle("Keep Post FX (bloom/contrast)", prefKeepPostFx)
+                .Toggle("P-Noclip (through players)", prefPlayerNoclip)
                 .Button("Bag Looking", () => ToggleStorage());
         }
 
@@ -186,11 +195,12 @@ namespace QuestMods
                 .Button("Overhaul Sharp: headset render scale", () => { })
                 .Button("Max Detail: force highest LOD everywhere", () => { })
                 .Button("Keep Post FX: leave grading, strip blue film", () => { })
+                .Button("P-Noclip: pass through players, terrain stays", () => { })
                 .Button("Wrist HUD: FPS + SAFE / NOT SAFE", () => { })
                 .Button("Safe Range: how far 'around you' is", () => { })
                 .Button("Seen = clear sight + looking at you", () => { })
                 .Button("Fully away = nobody in range for 5s", () => { })
-                .Button("Wrist buttons: side + pose of the display", () => { });
+                .Button("Arm Display: side + pose of the forearm text", () => { });
         }
 
         public static void ToggleStorage()
@@ -300,6 +310,19 @@ namespace QuestMods
             catch (Exception ex) { MelonLogger.Warning("[Graphics] tick failed: " + ex.Message); }
             try { TickMaxDetail(); }
             catch (Exception ex) { MelonLogger.Warning("[Graphics] detail tick failed: " + ex.Message); }
+            try { TickMakeDayLock(); }
+            catch (Exception ex) { MelonLogger.Warning("[HarmonyClient] Make Day lock failed: " + ex.Message); }
+
+            if (prefPlayerNoclip != null && prefPlayerNoclip.Value != lastPlayerNoclipPref)
+            {
+                lastPlayerNoclipPref = prefPlayerNoclip.Value;
+                if (!lastPlayerNoclipPref) RestorePlayerNoclip();
+                else playerNoclipNext = 0f;
+            }
+            try { TickPlayerNoclip(); }
+            catch (Exception ex) { MelonLogger.Warning("[P-Noclip] tick failed: " + ex.Message); }
+            try { TickSky(Camera.main); }
+            catch (Exception ex) { MelonLogger.Warning("[Graphics] sky tick failed: " + ex.Message); }
         }
 
         private static void ApplySuperSpeed(bool enabled)
@@ -307,20 +330,20 @@ namespace QuestMods
             try
             {
                 PlayerController pc = PlayerController.Current;
-                if (pc == null) { MelonLogger.Warning("[QuestMods] SuperSpeed: PlayerController.Current is null."); return; }
+                if (pc == null) { MelonLogger.Warning("[HarmonyClient] SuperSpeed: PlayerController.Current is null."); return; }
                 PlayerCharacter playerCharacter = pc.TryCast<PlayerCharacter>();
                 if (playerCharacter != null && playerCharacter.Health != null && playerCharacter.Health.StatManager != null)
                 {
                     if (playerCharacter.Health.StatManager.GetStat("speed", out Stat stat) && stat != null)
                     {
                         stat.Base = enabled ? 5f : 1f;
-                        MelonLogger.Msg("[QuestMods] Super Speed " + (enabled ? "ON (5x)" : "OFF (1x)") + ".");
+                        MelonLogger.Msg("[HarmonyClient] Super Speed " + (enabled ? "ON (5x)" : "OFF (1x)") + ".");
                         return;
                     }
                 }
-                MelonLogger.Warning("[QuestMods] SuperSpeed: could not get 'speed' stat on PlayerCharacter.");
+                MelonLogger.Warning("[HarmonyClient] SuperSpeed: could not get 'speed' stat on PlayerCharacter.");
             }
-            catch (Exception ex) { MelonLogger.Warning("[QuestMods] ApplySuperSpeed failed: " + ex.Message); }
+            catch (Exception ex) { MelonLogger.Warning("[HarmonyClient] ApplySuperSpeed failed: " + ex.Message); }
         }
 
         private static void ApplyFly(bool enabled)
@@ -328,20 +351,20 @@ namespace QuestMods
             try
             {
                 PlayerController pc = PlayerController.Current;
-                if (pc == null) { MelonLogger.Warning("[QuestMods] Fly: PlayerController.Current is null."); return; }
+                if (pc == null) { MelonLogger.Warning("[HarmonyClient] Fly: PlayerController.Current is null."); return; }
                 SmoothLocomotionPlayerController slpc = pc.TryCast<SmoothLocomotionPlayerController>();
                 if (slpc != null && slpc.SmoothLocomotion != null)
                 {
                     if (slpc.SmoothLocomotion.IsDebugMovement != enabled)
                         slpc.SmoothLocomotion.ToggleDebug();
-                    MelonLogger.Msg("[QuestMods] Fly (Debug Movement) " + (enabled ? "ON" : "OFF") + ".");
+                    MelonLogger.Msg("[HarmonyClient] Fly (Debug Movement) " + (enabled ? "ON" : "OFF") + ".");
                 }
                 else
                 {
-                    MelonLogger.Warning("[QuestMods] Fly: SmoothLocomotionPlayerController not found.");
+                    MelonLogger.Warning("[HarmonyClient] Fly: SmoothLocomotionPlayerController not found.");
                 }
             }
-            catch (Exception ex) { MelonLogger.Warning("[QuestMods] ApplyFly failed: " + ex.Message); }
+            catch (Exception ex) { MelonLogger.Warning("[HarmonyClient] ApplyFly failed: " + ex.Message); }
         }
 
         private static int noclipPlayerLayer = -1, noclipTerrainLayer = -1;
@@ -349,15 +372,15 @@ namespace QuestMods
         {
             try
             {
-                if (!EnsurePhysicsReflection()) { MelonLogger.Warning("[QuestMods] Noclip: Physics reflection failed."); return; }
+                if (!EnsurePhysicsReflection()) { MelonLogger.Warning("[HarmonyClient] Noclip: Physics reflection failed."); return; }
                 MethodInfo ignoreCol = physType.GetMethod("IgnoreLayerCollision", new Type[] { typeof(int), typeof(int), typeof(bool) });
-                if (ignoreCol == null) { MelonLogger.Warning("[QuestMods] Noclip: IgnoreLayerCollision not found."); return; }
+                if (ignoreCol == null) { MelonLogger.Warning("[HarmonyClient] Noclip: IgnoreLayerCollision not found."); return; }
 
                 if (!enabled)
                 {
                     if (noclipPlayerLayer != -1 && noclipTerrainLayer != -1)
                         ignoreCol.Invoke(null, new object[] { noclipPlayerLayer, noclipTerrainLayer, false });
-                    MelonLogger.Msg("[QuestMods] Noclip OFF.");
+                    MelonLogger.Msg("[HarmonyClient] Noclip OFF.");
                     return;
                 }
 
@@ -371,14 +394,14 @@ namespace QuestMods
                 if (noclipPlayerLayer != -1 && noclipTerrainLayer != -1)
                 {
                     ignoreCol.Invoke(null, new object[] { noclipPlayerLayer, noclipTerrainLayer, true });
-                    MelonLogger.Msg("[QuestMods] Noclip ON (layers " + noclipPlayerLayer + " / " + noclipTerrainLayer + ").");
+                    MelonLogger.Msg("[HarmonyClient] Noclip ON (layers " + noclipPlayerLayer + " / " + noclipTerrainLayer + ").");
                 }
                 else
                 {
-                    MelonLogger.Warning("[QuestMods] Noclip: layers not ready (player=" + noclipPlayerLayer + ", terrain=" + noclipTerrainLayer + ").");
+                    MelonLogger.Warning("[HarmonyClient] Noclip: layers not ready (player=" + noclipPlayerLayer + ", terrain=" + noclipTerrainLayer + ").");
                 }
             }
-            catch (Exception ex) { MelonLogger.Warning("[QuestMods] ApplyNoclip failed: " + ex.Message); }
+            catch (Exception ex) { MelonLogger.Warning("[HarmonyClient] ApplyNoclip failed: " + ex.Message); }
         }
 
         private static int GrabCoins()
@@ -397,7 +420,7 @@ namespace QuestMods
                 }
                 if (localInteractor == null)
                 {
-                    MelonLogger.Warning("[QuestMods] GrabCoins failed: no local interactor.");
+                    MelonLogger.Warning("[HarmonyClient] GrabCoins failed: no local interactor.");
                     return 0;
                 }
 
@@ -421,12 +444,12 @@ namespace QuestMods
                     }
                     catch { }
                 }
-                MelonLogger.Msg("[QuestMods] GrabCoins: grabbed " + grabbed + " coin(s).");
+                MelonLogger.Msg("[HarmonyClient] GrabCoins: grabbed " + grabbed + " coin(s).");
                 return grabbed;
             }
             catch (Exception ex)
             {
-                MelonLogger.Warning("[QuestMods] GrabCoins failed: " + ex.Message);
+                MelonLogger.Warning("[HarmonyClient] GrabCoins failed: " + ex.Message);
                 return 0;
             }
         }
@@ -442,10 +465,10 @@ namespace QuestMods
                     harmony.Patch(checkGrab,
                         prefix: new HarmonyMethod(typeof(Mod).GetMethod(nameof(CheckGrabPrefix), BindingFlags.Static | BindingFlags.NonPublic)),
                         postfix: new HarmonyMethod(typeof(Mod).GetMethod(nameof(CheckGrabPostfix), BindingFlags.Static | BindingFlags.NonPublic)));
-                    MelonLogger.Msg("[QuestMods] Patched ClimbingHand.CheckGrab for Air Grab.");
+                    MelonLogger.Msg("[HarmonyClient] Patched ClimbingHand.CheckGrab for Air Grab.");
                 }
             }
-            catch (Exception ex) { MelonLogger.Warning("[QuestMods] AirGrab patch failed: " + ex.Message); }
+            catch (Exception ex) { MelonLogger.Warning("[HarmonyClient] AirGrab patch failed: " + ex.Message); }
 
             try
             {
@@ -464,37 +487,37 @@ namespace QuestMods
                 MethodInfo craftWith = AccessTools.Method(typeof(CraftingPart), "CraftWithSlot", null, null);
                 if (craftWith != null)
                     harmony.Patch(craftWith, prefix: new HarmonyMethod(typeof(Mod).GetMethod(nameof(CraftWithSlotPrefix), BindingFlags.Static | BindingFlags.NonPublic)));
-                MelonLogger.Msg("[QuestMods] Patched JointSlot/CraftingPart for Any Connect.");
+                MelonLogger.Msg("[HarmonyClient] Patched JointSlot/CraftingPart for Any Connect.");
 
                 MethodInfo unlockCheck = AccessTools.Method(typeof(PlayerUnlockManager), "Check", null, null);
                 if (unlockCheck != null)
                 {
                     harmony.Patch(unlockCheck, postfix: new HarmonyMethod(typeof(Mod).GetMethod(nameof(UnlockCheckPostfix), BindingFlags.Static | BindingFlags.NonPublic)));
-                    MelonLogger.Msg("[QuestMods] Patched PlayerUnlockManager.Check for Air Grab.");
+                    MelonLogger.Msg("[HarmonyClient] Patched PlayerUnlockManager.Check for Air Grab.");
                 }
 
                 MethodInfo maxQty = AccessTools.PropertyGetter(typeof(PickupDock), "MaxQuantityCurrentlyPossible");
                 if (maxQty != null)
                 {
                     harmony.Patch(maxQty, postfix: new HarmonyMethod(typeof(Mod).GetMethod(nameof(PouchMaxQuantityPostfix), BindingFlags.Static | BindingFlags.NonPublic)));
-                    MelonLogger.Msg("[QuestMods] Patched PickupDock.MaxQuantityCurrentlyPossible for Pouch Limit.");
+                    MelonLogger.Msg("[HarmonyClient] Patched PickupDock.MaxQuantityCurrentlyPossible for Pouch Limit.");
                 }
 
                 MethodInfo moveToSafety = AccessTools.Method(typeof(SmoothLocomotion), "MoveToSafety", null, null);
                 if (moveToSafety != null)
                 {
                     harmony.Patch(moveToSafety, prefix: new HarmonyMethod(typeof(Mod).GetMethod(nameof(MoveToSafetyPrefix), BindingFlags.Static | BindingFlags.NonPublic)));
-                    MelonLogger.Msg("[QuestMods] Patched SmoothLocomotion.MoveToSafety for Noclip No-Void-TP.");
+                    MelonLogger.Msg("[HarmonyClient] Patched SmoothLocomotion.MoveToSafety for Noclip No-Void-TP.");
                 }
 
                 MethodInfo handleClimbing = AccessTools.Method(typeof(ClimbingHandler), "HandleClimbing", null, null);
                 if (handleClimbing != null)
                 {
                     harmony.Patch(handleClimbing, postfix: new HarmonyMethod(typeof(Mod).GetMethod(nameof(HandleClimbingPostfix), BindingFlags.Static | BindingFlags.NonPublic)));
-                    MelonLogger.Msg("[QuestMods] Patched ClimbingHandler.HandleClimbing for Air Grab infinite stamina.");
+                    MelonLogger.Msg("[HarmonyClient] Patched ClimbingHandler.HandleClimbing for Air Grab infinite stamina.");
                 }
             }
-            catch (Exception ex) { MelonLogger.Warning("[QuestMods] AnyConnect/Extra patch failed: " + ex.Message); }
+            catch (Exception ex) { MelonLogger.Warning("[HarmonyClient] AnyConnect/Extra patch failed: " + ex.Message); }
         }
 
         private static void UnlockCheckPostfix(ref bool __result)
@@ -595,7 +618,7 @@ namespace QuestMods
                 if (caveRenderLabelObj != null) UnityEngine.Object.Destroy(caveRenderLabelObj);
                 if (textMeshType != null)
                 {
-                    caveRenderLabelObj = new GameObject("QuestMods_CaveRendering");
+                    caveRenderLabelObj = new GameObject("HarmonyClient_CaveRendering");
                     caveRenderLabelTm = caveRenderLabelObj.AddComponent(Il2CppInterop.Runtime.Il2CppType.From(textMeshType));
                     object typed = typeof(Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase).GetMethod("TryCast", BindingFlags.Instance | BindingFlags.Public)?.MakeGenericMethod(textMeshType).Invoke(caveRenderLabelTm, null);
                     if (typed != null)
@@ -682,7 +705,7 @@ namespace QuestMods
             else pouchLimit = 0;
 
             string msgText = pouchLimit > 0 ? ("Pouch Limit: " + pouchLimit) : "Pouch Limit: OFF (100)";
-            MelonLogger.Msg("[QuestMods] " + msgText);
+            MelonLogger.Msg("[HarmonyClient] " + msgText);
         }
 
         private static float nextDurabilityUpdate;
@@ -731,7 +754,7 @@ namespace QuestMods
                 if (dm == null || dm.WasCollected) continue;
                 if (!durabilityLabels.TryGetValue(dm.Pointer, out Component tm) || tm == null || tm.WasCollected)
                 {
-                    GameObject go = new GameObject("QuestMods_DurabilityLabel");
+                    GameObject go = new GameObject("HarmonyClient_DurabilityLabel");
                     go.transform.SetParent(dm.transform, false);
                     go.transform.localPosition = new Vector3(0f, 0.15f, 0f);
                     tm = go.AddComponent(Il2CppInterop.Runtime.Il2CppType.From(textMeshType));
@@ -791,18 +814,26 @@ namespace QuestMods
         // Anchor presets: where the text sits on the controller and how it is
         // tilted, so it can be made to sit flush on the back of the wrist.
         // Cycle with the "Wrist Pose" tablet button until it looks right.
+        // Display sits on the FOREARM, laid sideways so the lines run along the
+        // arm. The roll (z) of 90 degrees turns the text a quarter turn; the
+        // offset moves it up the forearm away from the hand.
         private static readonly (string Label, Vector3 Pos, Quaternion Rot)[] wristPoses =
         {
-            ("Back 60",    new Vector3(0f,  0.020f, -0.050f), Quaternion.Euler(60f, 0f, 0f)),
-            ("Back 45",    new Vector3(0f,  0.018f, -0.048f), Quaternion.Euler(45f, 0f, 0f)),
-            ("Back 75",    new Vector3(0f,  0.022f, -0.052f), Quaternion.Euler(75f, 0f, 0f)),
-            ("Top 90",     new Vector3(0f,  0.055f, -0.010f), Quaternion.Euler(90f, 0f, 0f)),
-            ("Palm 60",    new Vector3(0f, -0.028f, -0.050f), Quaternion.Euler(-60f, 0f, 0f)),
-            ("Flipped 60", new Vector3(0f,  0.020f, -0.050f), Quaternion.Euler(60f, 180f, 0f)),
-            ("Flat",       new Vector3(0f,  0.012f, -0.050f), Quaternion.identity)
+            ("Forearm A",  new Vector3(0f,     0.090f, -0.030f), Quaternion.Euler(55f, 0f, 90f)),
+            ("Forearm B",  new Vector3(0f,     0.090f, -0.030f), Quaternion.Euler(55f, 0f, -90f)),
+            ("Forearm Hi", new Vector3(0f,     0.115f, -0.020f), Quaternion.Euler(75f, 0f, 90f)),
+            ("Forearm Lo", new Vector3(0f,     0.060f, -0.040f), Quaternion.Euler(40f, 0f, 90f)),
+            ("Forearm In", new Vector3(0.028f, 0.090f, -0.030f), Quaternion.Euler(55f, 0f, 90f)),
+            ("Forearm Out",new Vector3(-0.028f,0.090f, -0.030f), Quaternion.Euler(55f, 0f, 90f)),
+            ("Wrist Back", new Vector3(0f,     0.020f, -0.050f), Quaternion.Euler(60f, 0f, 0f)),
+            ("Flat",       new Vector3(0f,     0.012f, -0.050f), Quaternion.identity)
         };
         private static int wristPoseIndex;
         private static bool wristSideRight;
+
+        // Purple display; only SAFE / NOT SAFE / SCANNING keep their own colour.
+        private static readonly Color WristPurpleBright = new Color(0.78f, 0.45f, 1f);
+        private static readonly Color WristPurpleDim = new Color(0.58f, 0.32f, 0.92f);
 
         private static string WristPoseLabel()
         {
@@ -907,9 +938,9 @@ namespace QuestMods
                     " looking=" + scan.Seers + " unknown=" + scan.Unknown + " range=" + wristRange + "m)");
             }
 
-            ApplyWristLabel(wristFpsTm, wristFpsTyped, ref wristFpsCache, fpsText, Color.white);
+            ApplyWristLabel(wristFpsTm, wristFpsTyped, ref wristFpsCache, fpsText, WristPurpleBright);
             ApplyWristLabel(wristStatusTm, wristStatusTyped, ref wristStatusCache, statusText, statusColor);
-            ApplyWristLabel(wristInfoTm, wristInfoTyped, ref wristInfoCache, infoText, new Color(0.72f, 0.75f, 0.8f));
+            ApplyWristLabel(wristInfoTm, wristInfoTyped, ref wristInfoCache, infoText, WristPurpleDim);
         }
 
         private static bool EnsureWristHud()
@@ -923,7 +954,7 @@ namespace QuestMods
             try
             {
                 // No plate/box: just clean text rigidly attached to the wrist.
-                wristRoot = new GameObject("QuestMods_WristHUD");
+                wristRoot = new GameObject("HarmonyClient_WristHUD");
                 wristFpsTm = CreateWristText(wristRoot.transform, new Vector3(0f, 0.027f, -0.002f), 0.012f, 48, out wristFpsTyped);
                 wristStatusTm = CreateWristText(wristRoot.transform, new Vector3(0f, -0.002f, -0.002f), 0.015f, 48, out wristStatusTyped);
                 wristInfoTm = CreateWristText(wristRoot.transform, new Vector3(0f, -0.031f, -0.002f), 0.008f, 32, out wristInfoTyped);
@@ -941,7 +972,7 @@ namespace QuestMods
         private static Component CreateWristText(Transform parent, Vector3 localPos, float charSize, int fontSize, out object typed)
         {
             typed = null;
-            GameObject go = new GameObject("QuestMods_WristLabel");
+            GameObject go = new GameObject("HarmonyClient_WristLabel");
             go.transform.SetParent(parent, false);
             go.transform.localPosition = localPos;
             Component tm = go.AddComponent(Il2CppInterop.Runtime.Il2CppType.From(textMeshType));
@@ -1201,7 +1232,7 @@ namespace QuestMods
         {
             while (t != null)
             {
-                if (t.name != null && t.name.StartsWith("QuestMods_")) return true;
+                if (t.name != null && t.name.StartsWith("HarmonyClient_")) return true;
                 t = t.parent;
             }
             return false;
@@ -1239,6 +1270,7 @@ namespace QuestMods
             yield return prefPlayerEsp;
             yield return prefGraphics;
             yield return prefMaxDetail;
+            yield return prefPlayerNoclip;
         }
 
         // Runs every frame from SyncTabletToggles, so a panic cannot be undone
@@ -1517,9 +1549,9 @@ namespace QuestMods
         private static EspMarker GetEspMarker(IntPtr ptr, string name)
         {
             if (espMarkers.TryGetValue(ptr, out EspMarker m) && m != null && m.Root != null) return m;
-            GameObject root = new GameObject("QuestMods_ESPMarker");
+            GameObject root = new GameObject("HarmonyClient_ESPMarker");
             GameObject body = GameObject.CreatePrimitive(PrimitiveType.Capsule);
-            body.name = "QuestMods_ESPBody";
+            body.name = "HarmonyClient_ESPBody";
             body.transform.SetParent(root.transform, false);
             body.transform.localScale = new Vector3(0.35f, 0.9f, 0.35f);
             Collider bodyCol = body.GetComponent<Collider>();
@@ -1528,7 +1560,7 @@ namespace QuestMods
             if (bodyRend != null) bodyRend.material = espMaterial;
 
             GameObject head = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-            head.name = "QuestMods_ESPHead";
+            head.name = "HarmonyClient_ESPHead";
             head.transform.SetParent(root.transform, false);
             head.transform.localPosition = new Vector3(0f, 0.85f, 0f);
             head.transform.localScale = new Vector3(0.28f, 0.28f, 0.28f);
@@ -1632,6 +1664,7 @@ namespace QuestMods
                 else if (graphicsApplied)
                 {
                     RestoreGraphics();
+                    SkySceneLoaded();
                     graphicsApplied = false;
                     MelonLogger.Msg("[Graphics] Overhaul OFF: original visuals restored.");
                 }
@@ -1661,6 +1694,8 @@ namespace QuestMods
             camSnaps.Clear();
             terrainSnaps.Clear();
             terrainLogged = false;
+            atmosphereChecked = false;
+            hasAtmosphere = false;
             maxDetailLogged = false;
             maxDetailNext = 0f;
             graphicsNextReapply = 0f;
@@ -1795,17 +1830,32 @@ namespace QuestMods
             RenderSettings.fogStartDistance = 100000f;
             RenderSettings.fogEndDistance = 100000f;
 
-            // 2. Lighting: three-colour ambient instead of the flat cold wash, so
-            // shadows are lit by sky colour and open ground is warm, plus a
-            // stronger reflection term and a brighter sky.
-            RenderSettings.ambientMode = UnityEngine.Rendering.AmbientMode.Trilight;
-            RenderSettings.ambientSkyColor = new Color(0.58f, 0.62f, 0.72f);
-            RenderSettings.ambientEquatorColor = new Color(0.52f, 0.50f, 0.46f);
-            RenderSettings.ambientGroundColor = new Color(0.34f, 0.31f, 0.26f);
-            RenderSettings.ambientIntensity = 1.25f;
-            RenderSettings.reflectionIntensity = 1.3f;
+            // 2. Lighting: three-colour ambient instead of the flat cold wash -
+            // but never fight the game's own DayTimeManager, which lerps the
+            // ambient colour through the day/night cycle (and is what Make Day
+            // drives). If that atmosphere exists we only push intensity.
+            bool nightKnown;
+            bool night = IsGameNight(out nightKnown);
+            if (!HasGameAtmosphere())
+            {
+                RenderSettings.ambientMode = UnityEngine.Rendering.AmbientMode.Trilight;
+                if (night)
+                {
+                    RenderSettings.ambientSkyColor = new Color(0.34f, 0.40f, 0.62f);
+                    RenderSettings.ambientEquatorColor = new Color(0.26f, 0.27f, 0.38f);
+                    RenderSettings.ambientGroundColor = new Color(0.14f, 0.14f, 0.20f);
+                }
+                else
+                {
+                    RenderSettings.ambientSkyColor = new Color(0.58f, 0.62f, 0.72f);
+                    RenderSettings.ambientEquatorColor = new Color(0.52f, 0.50f, 0.46f);
+                    RenderSettings.ambientGroundColor = new Color(0.34f, 0.31f, 0.26f);
+                }
+            }
+            RenderSettings.ambientIntensity = night ? 1.2f : 1.25f;
+            RenderSettings.reflectionIntensity = night ? 1.7f : 1.3f;
             Material sky = RenderSettings.skybox;
-            if (sky != null && sky.HasProperty("_Exposure")) sky.SetFloat("_Exposure", 1.3f);
+            if (sky != null && sky.HasProperty("_Exposure")) sky.SetFloat("_Exposure", night ? 1.55f : 1.3f);
 
             // 3. Full texture resolution, longer LODs, better shadows and filtering.
             SetQualityValue("masterTextureLimit", 0);
@@ -2036,6 +2086,174 @@ namespace QuestMods
             graphicsDisabledBehaviours.Clear();
             graphicsDisabledRenderers.Clear();
             camSnaps.Clear();
+        }
+
+        // --- Day/night awareness ----------------------------------------------
+        // DayTimeManager and GameTimeManager live in Alta.Environmental.Atmosphere,
+        // which this project does not reference, so both are reached by reflection.
+        private static bool atmosphereChecked, hasAtmosphere;
+
+        private static bool HasGameAtmosphere()
+        {
+            if (atmosphereChecked) return hasAtmosphere;
+            atmosphereChecked = true;
+            try
+            {
+                foreach (UnityEngine.MonoBehaviour mb in UnityEngine.Object.FindObjectsOfType<UnityEngine.MonoBehaviour>())
+                {
+                    if (mb == null) continue;
+                    Type t = mb.GetType();
+                    if (t != null && t.Name == "DayTimeManager") { hasAtmosphere = true; break; }
+                }
+            }
+            catch { }
+            if (hasAtmosphere)
+                MelonLogger.Msg("[Graphics] Day/night atmosphere found; leaving its ambient colour to the game.");
+            return hasAtmosphere;
+        }
+
+        private static bool IsGameNight(out bool known)
+        {
+            known = false;
+            try
+            {
+                Type t = FindLoadedType("GameTimeManager");
+                if (t == null) return false;
+                PropertyInfo p = t.GetProperty("IsNight", BindingFlags.Public | BindingFlags.Static | BindingFlags.NonPublic);
+                if (p == null) return false;
+                object v = p.GetValue(null);
+                if (v is bool b) { known = true; return b; }
+            }
+            catch { }
+            return false;
+        }
+
+        // --- Sky: 3D stars and planets ----------------------------------------
+        // Real geometry that lives far inside the camera far plane and follows the
+        // player, so it parallaxes slightly instead of being a flat skybox. Fades
+        // out during the day unless the game's night flag cannot be read.
+        private static GameObject skyRoot;
+        private static Material skyStarMat, skyPlanetMatA, skyPlanetMatB;
+        private static readonly List<Transform> skyStarTf = new List<Transform>();
+        private static bool skyLogged;
+        private static float skyNextBillboard;
+
+        public static void SkySceneLoaded()
+        {
+            if (skyRoot != null) UnityEngine.Object.Destroy(skyRoot);
+            skyRoot = null;
+            skyStarTf.Clear();
+            if (skyStarMat != null) UnityEngine.Object.Destroy(skyStarMat);
+            if (skyPlanetMatA != null) UnityEngine.Object.Destroy(skyPlanetMatA);
+            if (skyPlanetMatB != null) UnityEngine.Object.Destroy(skyPlanetMatB);
+            skyStarMat = skyPlanetMatA = skyPlanetMatB = null;
+            skyLogged = false;
+            skyNextBillboard = 0f;
+        }
+
+        private static Material SkyMaterial(Color c, bool doubleSided)
+        {
+            Shader sh = doubleSided
+                ? (Shader.Find("Sprites/Default") ?? Shader.Find("Unlit/Color"))
+                : (Shader.Find("Unlit/Color") ?? Shader.Find("Sprites/Default"));
+            if (sh == null) return null;
+            Material m = new Material(sh);
+            if (m.HasProperty("_Color")) m.SetColor("_Color", c);
+            else m.color = c;
+            return m;
+        }
+
+        private static void SkyRenderable(GameObject go, Material mat)
+        {
+            Collider col = go.GetComponent<Collider>();
+            if (col != null) UnityEngine.Object.Destroy(col);
+            Renderer r = go.GetComponent<Renderer>();
+            if (r == null) return;
+            r.material = mat;
+            r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            r.receiveShadows = false;
+        }
+
+        private static void EnsureSky(Camera cam)
+        {
+            if (skyRoot != null) return;
+            float radius = Mathf.Clamp(cam != null ? cam.farClipPlane * 0.72f : 2000f, 600f, 3200f);
+            skyStarMat = SkyMaterial(new Color(0.94f, 0.90f, 1f, 1f), true);
+            skyPlanetMatA = SkyMaterial(new Color(1f, 0.74f, 0.44f, 1f), false);
+            skyPlanetMatB = SkyMaterial(new Color(0.62f, 0.76f, 1f, 1f), false);
+            if (skyStarMat == null) return;
+
+            skyRoot = new GameObject("HarmonyClient_Sky");
+            var rng = new System.Random(4711);
+            for (int i = 0; i < 220; i++)
+            {
+                double az = rng.NextDouble() * Math.PI * 2.0;
+                double el = 0.06 + rng.NextDouble() * 1.40;
+                Vector3 dir = new Vector3(
+                    (float)(Math.Cos(az) * Math.Cos(el)),
+                    (float)Math.Sin(el),
+                    (float)(Math.Sin(az) * Math.Cos(el)));
+                GameObject star = GameObject.CreatePrimitive(PrimitiveType.Quad);
+                star.name = "HarmonyClient_Star";
+                star.transform.SetParent(skyRoot.transform, false);
+                star.transform.position = dir.normalized * radius;
+                float size = radius * (0.0018f + (float)rng.NextDouble() * 0.0042f);
+                star.transform.localScale = new Vector3(size, size, 1f);
+                SkyRenderable(star, skyStarMat);
+                if (i < 200) skyStarTf.Add(star.transform);
+            }
+
+            // A few big planets, including a ringed-looking one.
+            Vector3[] planetDirs =
+            {
+                new Vector3(-0.45f, 0.62f, 0.65f),
+                new Vector3(0.70f, 0.42f, -0.35f),
+                new Vector3(0.15f, 0.78f, -0.62f)
+            };
+            float[] planetSizes = { 0.028f, 0.019f, 0.013f };
+            for (int i = 0; i < planetDirs.Length; i++)
+            {
+                GameObject planet = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+                planet.name = "HarmonyClient_Planet";
+                planet.transform.SetParent(skyRoot.transform, false);
+                planet.transform.position = planetDirs[i].normalized * (radius * 0.96f);
+                float size = radius * planetSizes[i];
+                planet.transform.localScale = new Vector3(size, size, size);
+                SkyRenderable(planet, (i % 2 == 0) ? skyPlanetMatA : skyPlanetMatB);
+            }
+        }
+
+        private static void TickSky(Camera cam)
+        {
+            if (prefGraphics == null || !prefGraphics.Value)
+            {
+                if (skyRoot != null) SkySceneLoaded();
+                return;
+            }
+            if (skyRoot == null) { EnsureSky(cam); if (skyRoot == null) return; }
+            bool known;
+            bool night = IsGameNight(out known);
+            bool show = !known || night;
+            if (skyRoot.activeSelf != show) skyRoot.SetActive(show);
+            if (!show) return;
+            if (cam != null) skyRoot.transform.position = cam.transform.position;
+            skyRoot.transform.Rotate(0f, 0.5f * Time.deltaTime, 0f, Space.World);
+            if (Time.time < skyNextBillboard) return;
+            skyNextBillboard = Time.time + 0.4f;
+            if (cam == null) return;
+            Vector3 eye = cam.transform.position;
+            foreach (Transform tf in skyStarTf)
+            {
+                if (tf == null) continue;
+                Vector3 away = tf.position - eye;
+                if (away.sqrMagnitude < 1f) continue;
+                tf.rotation = Quaternion.LookRotation(away, Vector3.up);
+            }
+            if (!skyLogged)
+            {
+                skyLogged = true;
+                MelonLogger.Msg("[Graphics] Sky: " + skyStarTf.Count + " stars and 3 planets placed.");
+            }
         }
 
         // --- Far-detail work: terrain, foliage and LOD -------------------------
@@ -2304,9 +2522,9 @@ namespace QuestMods
                     ?? typeof(TabletUI).GetMethod("ShowPage", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
                 Page page = BuildPlayerTPsPage();
                 if (openPage != null) openPage.Invoke(null, new object[] { page });
-                else MelonLogger.Warning("[QuestMods] TabletUI navigation method not found.");
+                else MelonLogger.Warning("[HarmonyClient] TabletUI navigation method not found.");
             }
-            catch (Exception ex) { MelonLogger.Warning("[QuestMods] OpenPlayerTPs failed: " + ex.Message); }
+            catch (Exception ex) { MelonLogger.Warning("[HarmonyClient] OpenPlayerTPs failed: " + ex.Message); }
         }
 
         private static string WaypointsFilePath => Path.Combine(MelonEnvironment.UserDataDirectory, "questmods_waypoints.txt");
@@ -2316,7 +2534,7 @@ namespace QuestMods
             try
             {
                 var pc = PlayerController.Current;
-                if (pc == null) { MelonLogger.Warning("[QuestMods] Dev Light: local player not ready."); return; }
+                if (pc == null) { MelonLogger.Warning("[HarmonyClient] Dev Light: local player not ready."); return; }
                 foreach (var ctrl in new[] { pc.LeftController, pc.RightController })
                 {
                     if (ctrl == null) continue;
@@ -2324,9 +2542,9 @@ namespace QuestMods
                     if (lh != null && lh.enabled != enable)
                         lh.Toggle();
                 }
-                MelonLogger.Msg("[QuestMods] Dev Light " + (enable ? "enabled" : "disabled") + ".");
+                MelonLogger.Msg("[HarmonyClient] Dev Light " + (enable ? "enabled" : "disabled") + ".");
             }
-            catch (Exception ex) { MelonLogger.Warning("[QuestMods] ApplyDevLight failed: " + ex.Message); }
+            catch (Exception ex) { MelonLogger.Warning("[HarmonyClient] ApplyDevLight failed: " + ex.Message); }
         }
 
         private static int pendingDeleteIndex = -1;
@@ -2362,7 +2580,7 @@ namespace QuestMods
                     }
                 }
             }
-            catch (Exception ex) { MelonLogger.Warning("[QuestMods] LoadWaypoints failed: " + ex.Message); }
+            catch (Exception ex) { MelonLogger.Warning("[HarmonyClient] LoadWaypoints failed: " + ex.Message); }
             return list;
         }
 
@@ -2373,9 +2591,9 @@ namespace QuestMods
                 string cleanName = string.IsNullOrWhiteSpace(name) ? ("TP " + (LoadWaypoints().Count + 1)) : name.Replace("|", "").Trim();
                 string line = string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0}|{1:F3},{2:F3},{3:F3}", cleanName, pos.x, pos.y, pos.z);
                 File.AppendAllText(WaypointsFilePath, line + Environment.NewLine);
-                MelonLogger.Msg("[QuestMods] Saved waypoint: " + line);
+                MelonLogger.Msg("[HarmonyClient] Saved waypoint: " + line);
             }
-            catch (Exception ex) { MelonLogger.Warning("[QuestMods] SaveWaypointWithPos failed: " + ex.Message); }
+            catch (Exception ex) { MelonLogger.Warning("[HarmonyClient] SaveWaypointWithPos failed: " + ex.Message); }
         }
 
         private static void DeleteWaypoint(int index)
@@ -2385,7 +2603,7 @@ namespace QuestMods
                 if (pendingDeleteIndex != index)
                 {
                     pendingDeleteIndex = index;
-                    MelonLogger.Msg("[QuestMods] Are you sure? Click Del again to confirm deleting waypoint #" + (index + 1));
+                    MelonLogger.Msg("[HarmonyClient] Are you sure? Click Del again to confirm deleting waypoint #" + (index + 1));
                     return;
                 }
                 pendingDeleteIndex = -1;
@@ -2396,9 +2614,9 @@ namespace QuestMods
                 foreach (var wp in list)
                     lines.Add(string.Format(System.Globalization.CultureInfo.InvariantCulture, "{0}|{1:F3},{2:F3},{3:F3}", wp.Name, wp.Pos.x, wp.Pos.y, wp.Pos.z));
                 File.WriteAllLines(WaypointsFilePath, lines);
-                MelonLogger.Msg("[QuestMods] Deleted waypoint #" + (index + 1));
+                MelonLogger.Msg("[HarmonyClient] Deleted waypoint #" + (index + 1));
             }
-            catch (Exception ex) { MelonLogger.Warning("[QuestMods] DeleteWaypoint failed: " + ex.Message); }
+            catch (Exception ex) { MelonLogger.Warning("[HarmonyClient] DeleteWaypoint failed: " + ex.Message); }
         }
 
         private static GameObject kbRoot;
@@ -2414,7 +2632,7 @@ namespace QuestMods
             {
                 CloseWaypointKeyboard();
                 var pc = PlayerController.Current;
-                if (pc == null) { MelonLogger.Warning("[QuestMods] Save Pos: local player not ready."); return; }
+                if (pc == null) { MelonLogger.Warning("[HarmonyClient] Save Pos: local player not ready."); return; }
                 kbPendingPos = pc.PlayerFeetPosition;
                 kbTypedName = "";
 
@@ -2424,7 +2642,7 @@ namespace QuestMods
                 if (fwd.sqrMagnitude < 0.001f) fwd = Vector3.forward;
                 fwd.Normalize();
 
-                kbRoot = new GameObject("QuestMods_VRKeyboard");
+                kbRoot = new GameObject("HarmonyClient_VRKeyboard");
                 kbRoot.transform.position = headPos + fwd * 0.85f;
                 kbRoot.transform.rotation = Quaternion.LookRotation(fwd, Vector3.up);
 
@@ -2471,7 +2689,7 @@ namespace QuestMods
                     }
                 }
 
-                GameObject rayObj = new GameObject("QuestMods_KBRay");
+                GameObject rayObj = new GameObject("HarmonyClient_KBRay");
                 rayObj.transform.SetParent(kbRoot.transform, false);
                 kbRay = rayObj.AddComponent<LineRenderer>();
                 kbRay.positionCount = 2;
@@ -2481,7 +2699,7 @@ namespace QuestMods
                 kbRay.startColor = Color.red;
                 kbRay.endColor = Color.yellow;
             }
-            catch (Exception ex) { MelonLogger.Warning("[QuestMods] OpenWaypointKeyboard failed: " + ex.Message); }
+            catch (Exception ex) { MelonLogger.Warning("[HarmonyClient] OpenWaypointKeyboard failed: " + ex.Message); }
         }
 
         private static Component CreateKeyboardLabel(Transform parent, string text, float charSize)
@@ -2523,9 +2741,9 @@ namespace QuestMods
                     var held = pc?.RightController?.Interactor?.InteractingWith ?? pc?.LeftController?.Interactor?.InteractingWith;
                     pearlPickup = held != null ? held.TryCast<Pickup>() : null;
                     if (pearlPickup != null)
-                        MelonLogger.Msg("[QuestMods] Make Pearl: tracking '" + pearlPickup.name + "'.");
+                        MelonLogger.Msg("[HarmonyClient] Make Pearl: tracking '" + pearlPickup.name + "'.");
                     else
-                        MelonLogger.Warning("[QuestMods] Make Pearl: hold an item when toggling ON!");
+                        MelonLogger.Warning("[HarmonyClient] Make Pearl: hold an item when toggling ON!");
                 }
                 else
                 {
@@ -2663,7 +2881,7 @@ namespace QuestMods
                     page.Button(pendingDeleteIndex == wpIndex ? "Are you sure? (" + wp.Name + ")" : "Del: " + wp.Name, () => DeleteWaypoint(wpIndex));
                 }
             }
-            catch (Exception ex) { MelonLogger.Warning("[QuestMods] BuildCustomTPsPage failed: " + ex.Message); }
+            catch (Exception ex) { MelonLogger.Warning("[HarmonyClient] BuildCustomTPsPage failed: " + ex.Message); }
             return page;
         }
 
@@ -2673,7 +2891,7 @@ namespace QuestMods
             {
                 CloseWaypointKeyboard();
                 var pc = PlayerController.Current;
-                if (pc == null) { MelonLogger.Warning("[QuestMods] Cave NumPad: local player not ready."); return; }
+                if (pc == null) { MelonLogger.Warning("[HarmonyClient] Cave NumPad: local player not ready."); return; }
                 kbTypedName = "";
 
                 Transform cam = Camera.main != null ? Camera.main.transform : pc.transform;
@@ -2682,7 +2900,7 @@ namespace QuestMods
                 if (fwd.sqrMagnitude < 0.001f) fwd = Vector3.forward;
                 fwd.Normalize();
 
-                kbRoot = new GameObject("QuestMods_CaveNumPad");
+                kbRoot = new GameObject("HarmonyClient_CaveNumPad");
                 kbRoot.transform.position = headPos + fwd * 0.85f;
                 kbRoot.transform.rotation = Quaternion.LookRotation(fwd, Vector3.up);
 
@@ -2729,7 +2947,7 @@ namespace QuestMods
                     }
                 }
 
-                GameObject rayObj = new GameObject("QuestMods_KBRay");
+                GameObject rayObj = new GameObject("HarmonyClient_KBRay");
                 rayObj.transform.SetParent(kbRoot.transform, false);
                 kbRay = rayObj.AddComponent<LineRenderer>();
                 kbRay.positionCount = 2;
@@ -2739,7 +2957,7 @@ namespace QuestMods
                 kbRay.startColor = Color.red;
                 kbRay.endColor = Color.yellow;
             }
-            catch (Exception ex) { MelonLogger.Warning("[QuestMods] OpenCaveNumPad failed: " + ex.Message); }
+            catch (Exception ex) { MelonLogger.Warning("[HarmonyClient] OpenCaveNumPad failed: " + ex.Message); }
         }
 
         private static void TeleportToCaveLayer(int layer)
@@ -2782,7 +3000,7 @@ namespace QuestMods
 
                 StartCaveTeleportSequence(pos + Vector3.up * 0.2f, "Cave Layer " + layer, layer);
             }
-            catch (Exception ex) { MelonLogger.Warning("[QuestMods] TeleportToCaveLayer failed: " + ex.Message); }
+            catch (Exception ex) { MelonLogger.Warning("[HarmonyClient] TeleportToCaveLayer failed: " + ex.Message); }
         }
 
         private static Page BuildCavesPage()
@@ -2816,7 +3034,7 @@ namespace QuestMods
                     }
                 }
             }
-            catch (Exception ex) { MelonLogger.Warning("[QuestMods] BuildCavesPage failed: " + ex.Message); }
+            catch (Exception ex) { MelonLogger.Warning("[HarmonyClient] BuildCavesPage failed: " + ex.Message); }
             return page;
         }
 
@@ -2870,9 +3088,9 @@ namespace QuestMods
                     Vector3 targetPos = entry.Pos;
                     page.Button(targetName, () => TeleportLocalPlayer(targetPos, targetName));
                 }
-                MelonLogger.Msg("[QuestMods] Player TPs: listed " + list.Count + " online player(s).");
+                MelonLogger.Msg("[HarmonyClient] Player TPs: listed " + list.Count + " online player(s).");
             }
-            catch (Exception ex) { MelonLogger.Warning("[QuestMods] BuildPlayerTPsPage failed: " + ex.Message); }
+            catch (Exception ex) { MelonLogger.Warning("[HarmonyClient] BuildPlayerTPsPage failed: " + ex.Message); }
             return page;
         }
 
@@ -2881,10 +3099,10 @@ namespace QuestMods
             try
             {
                 PlayerController pc = PlayerController.Current;
-                if (pc == null) { MelonLogger.Warning("[QuestMods] TP: PlayerController.Current is null."); return; }
+                if (pc == null) { MelonLogger.Warning("[HarmonyClient] TP: PlayerController.Current is null."); return; }
                 SmoothLocomotionPlayerController slpc = pc.TryCast<SmoothLocomotionPlayerController>();
                 object loco = slpc != null ? (object)slpc.LocomotionController : pc.LocomotionController;
-                if (loco == null) { MelonLogger.Warning("[QuestMods] TP: LocomotionController not found."); return; }
+                if (loco == null) { MelonLogger.Warning("[HarmonyClient] TP: LocomotionController not found."); return; }
                 foreach (MethodInfo m in loco.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
                 {
                     if (m.Name != "MoveTo") continue;
@@ -2893,18 +3111,141 @@ namespace QuestMods
                     {
                         object arg2 = ps[1].ParameterType.IsEnum ? Enum.ToObject(ps[1].ParameterType, 0) : null;
                         m.Invoke(loco, new object[] { pos, arg2 });
-                        MelonLogger.Msg("[QuestMods] Teleported to " + targetName + ".");
+                        MelonLogger.Msg("[HarmonyClient] Teleported to " + targetName + ".");
                         return;
                     }
                     if (ps.Length == 1 && ps[0].ParameterType == typeof(Vector3))
                     {
                         m.Invoke(loco, new object[] { pos });
-                        MelonLogger.Msg("[QuestMods] Teleported to " + targetName + ".");
+                        MelonLogger.Msg("[HarmonyClient] Teleported to " + targetName + ".");
                         return;
                     }
                 }
             }
-            catch (Exception ex) { MelonLogger.Warning("[QuestMods] TeleportLocalPlayer failed: " + ex.Message); }
+            catch (Exception ex) { MelonLogger.Warning("[HarmonyClient] TeleportLocalPlayer failed: " + ex.Message); }
+        }
+
+        // --- P-Noclip: ignore other players only -------------------------------
+        // Physics.IgnoreCollision by collider pair, so terrain, buildings and props
+        // still collide exactly as before; only player-vs-player contact is off.
+        private static float playerNoclipNext;
+        private static bool playerNoclipLogged;
+
+        private static void TickPlayerNoclip()
+        {
+            if (prefPlayerNoclip == null || !prefPlayerNoclip.Value) return;
+            if (Time.time < playerNoclipNext) return;
+            playerNoclipNext = Time.time + 1f;
+            int pairs = SetPlayerCollisionIgnores(true);
+            if (pairs > 0 && !playerNoclipLogged)
+            {
+                playerNoclipLogged = true;
+                MelonLogger.Msg("[P-Noclip] ON: ignoring " + pairs + " player collider pair(s); terrain still solid.");
+            }
+        }
+
+        private static void RestorePlayerNoclip()
+        {
+            playerNoclipNext = 0f;
+            playerNoclipLogged = false;
+            int pairs = SetPlayerCollisionIgnores(false);
+            MelonLogger.Msg("[P-Noclip] OFF: player collisions restored (" + pairs + " pairs).");
+        }
+
+        private static int SetPlayerCollisionIgnores(bool ignore)
+        {
+            int pairs = 0;
+            PlayerController pc = PlayerController.Current;
+            if (pc == null) return 0;
+            Collider[] mine = pc.GetComponentsInChildren<Collider>(true);
+            if (mine == null || mine.Length == 0) return 0;
+            var all = Player.AllPlayers;
+            if (all == null) return 0;
+            IntPtr localPtr = Player.Current != null ? Player.Current.Pointer : IntPtr.Zero;
+            foreach (var raw in all)
+            {
+                if (raw == null) continue;
+                var il2 = raw as Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase;
+                if (il2 == null || il2.Pointer == localPtr) continue;
+                Player p = il2.TryCast<Player>();
+                if (p == null) continue;
+                PlayerController other = p.PlayerController;
+                if (other == null || other.Pointer == pc.Pointer) continue;
+                Collider[] theirs = other.GetComponentsInChildren<Collider>(true);
+                if (theirs == null) continue;
+                foreach (Collider a in mine)
+                {
+                    if (a == null) continue;
+                    foreach (Collider b in theirs)
+                    {
+                        if (b == null) continue;
+                        try { Physics.IgnoreCollision(a, b, ignore); pairs++; } catch { }
+                    }
+                }
+            }
+            return pairs;
+        }
+
+        // --- Tablet theme: purple -------------------------------------------------
+        // TabletUILib exposes no documented theme API, so this looks for any static
+        // or instance Color hook whose name mentions colour/accent/theme and pushes
+        // purple into it. If nothing matches, the tablet simply keeps its own look
+        // and the log says so instead of breaking anything.
+        private static readonly Color HarmonyPurple = new Color(0.55f, 0.25f, 0.95f);
+        private static bool tabletThemeLogged;
+
+        private static void ApplyTabletTheme()
+        {
+            int applied = 0;
+            try
+            {
+                Type uiType = FindLoadedType("TabletUI");
+                if (uiType == null) return;
+                foreach (Type t in uiType.Assembly.GetTypes())
+                {
+                    if (t == null) continue;
+                    foreach (PropertyInfo p in t.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static))
+                    {
+                        if (p.PropertyType != typeof(Color) || !p.CanWrite) continue;
+                        if (!ThemeName(p.Name)) continue;
+                        try { p.SetValue(null, HarmonyPurple); applied++; } catch { }
+                    }
+                    foreach (FieldInfo f in t.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static))
+                    {
+                        if (f.FieldType != typeof(Color) || f.IsInitOnly) continue;
+                        if (!ThemeName(f.Name)) continue;
+                        try { f.SetValue(null, HarmonyPurple); applied++; } catch { }
+                    }
+                }
+                // Live tablet objects too, in case the palette is per-instance.
+                foreach (UnityEngine.MonoBehaviour mb in UnityEngine.Object.FindObjectsOfType<UnityEngine.MonoBehaviour>())
+                {
+                    if (mb == null) continue;
+                    Type mt = mb.GetType();
+                    if (!mt.Name.ToLowerInvariant().Contains("tablet")) continue;
+                    foreach (PropertyInfo p in mt.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+                    {
+                        if (p.PropertyType != typeof(Color) || !p.CanWrite) continue;
+                        if (!ThemeName(p.Name)) continue;
+                        try { p.SetValue(mb, HarmonyPurple); applied++; } catch { }
+                    }
+                }
+            }
+            catch (Exception ex) { MelonLogger.Warning("[Theme] tablet: " + ex.Message); }
+            if (!tabletThemeLogged)
+            {
+                tabletThemeLogged = true;
+                if (applied > 0) MelonLogger.Msg("[Theme] Tablet accent set to purple (" + applied + " hook(s)).");
+                else MelonLogger.Msg("[Theme] TabletUILib exposes no colour hook; tablet keeps its default colours.");
+            }
+        }
+
+        private static bool ThemeName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+            string n = name.ToLowerInvariant();
+            if (n.Contains("background") || n.Contains("icon")) return false;
+            return n.Contains("color") || n.Contains("colour") || n.Contains("accent") || n.Contains("theme") || n.Contains("tint");
         }
 
         private static void MakeDay()
@@ -2925,14 +3266,70 @@ namespace QuestMods
                     target = mb;
                     break;
                 }
-                if (type == null || target == null) { MelonLogger.Warning("[QuestMods] Make Day: no DayTimeManager found in scene."); return; }
-                const BindingFlags flags = BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance;
-                type.GetField("isUpdatingDaytime", flags)?.SetValue(target, false);
-                type.GetMethod("UpdateRotation", flags)?.Invoke(target, new object[] { 0.25f, 0f });
-                type.GetMethod("UpdateAmbience", flags)?.Invoke(target, null);
-                MelonLogger.Msg("[QuestMods] Forced DayTimeManager to midday (client-side visual override only).");
+                if (type == null || target == null) { MelonLogger.Warning("[HarmonyClient] Make Day: no DayTimeManager found in scene."); return; }
+                makeDayType = type;
+                makeDayTarget = target;
+                // The server re-syncs the fixed daytime flag, so hold the override
+                // for a few seconds or it snaps straight back to the server time.
+                makeDayLockUntil = Time.time + 10f;
+                if (ApplyMakeDay(type, target))
+                    MelonLogger.Msg("[HarmonyClient] Forced midday (client-side visual override only).");
+                else
+                    MelonLogger.Warning("[HarmonyClient] Make Day: DayTimeManager members not found on this build.");
             }
-            catch (Exception ex) { MelonLogger.Warning("[QuestMods] MakeDay failed: " + ex.Message); }
+            catch (Exception ex) { MelonLogger.Warning("[HarmonyClient] MakeDay failed: " + ex.Message); }
+        }
+
+        private static Type makeDayType;
+        private static UnityEngine.Object makeDayTarget;
+        private static float makeDayLockUntil = -1f;
+
+        // Midday is dayProgress 0.25 (DayToNightRatio is 0.5 by default). Setting
+        // isUpdatingDaytime false is what actually stops LateUpdate from putting
+        // the old time straight back a frame later.
+        private static bool ApplyMakeDay(Type type, UnityEngine.Object target)
+        {
+            const BindingFlags flags = BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance;
+            bool touched = false;
+            try
+            {
+                PropertyInfo flagProp = type.GetProperty("isUpdatingDaytime", flags);
+                if (flagProp != null && flagProp.CanWrite) { flagProp.SetValue(target, false); touched = true; }
+                else
+                {
+                    FieldInfo flagField = type.GetField("isUpdatingDaytime", flags);
+                    if (flagField != null) { flagField.SetValue(target, false); touched = true; }
+                }
+            }
+            catch (Exception ex) { MelonLogger.Warning("[HarmonyClient] Make Day flag: " + ex.Message); }
+            try
+            {
+                MethodInfo rot = type.GetMethod("UpdateRotation", flags);
+                if (rot != null) { rot.Invoke(target, new object[] { 0.25f, 0f }); touched = true; }
+            }
+            catch (Exception ex) { MelonLogger.Warning("[HarmonyClient] Make Day rotation: " + ex.Message); }
+            try
+            {
+                MethodInfo amb = type.GetMethod("UpdateAmbience", flags);
+                if (amb != null) amb.Invoke(target, null);
+            }
+            catch (Exception ex) { MelonLogger.Warning("[HarmonyClient] Make Day ambience: " + ex.Message); }
+            // Keep the game's static night flag in sync so night-only effects stop.
+            try
+            {
+                Type gtm = FindLoadedType("GameTimeManager");
+                PropertyInfo isNight = gtm == null ? null : gtm.GetProperty("IsNight", BindingFlags.Public | BindingFlags.Static | BindingFlags.NonPublic);
+                if (isNight != null && isNight.CanWrite) isNight.SetValue(null, false);
+            }
+            catch { }
+            return touched;
+        }
+
+        private static void TickMakeDayLock()
+        {
+            if (Time.time > makeDayLockUntil) return;
+            if (makeDayType == null || makeDayTarget == null) return;
+            ApplyMakeDay(makeDayType, makeDayTarget);
         }
 
         // --- Air Grab ---
@@ -2971,7 +3368,7 @@ namespace QuestMods
             airGrabDepth++;
             if (airGrabDepth != 1 || prefAirGrab == null || !prefAirGrab.Value || __instance == null) return;
             try { PlaceAnchorIfNothingInReach(__instance); }
-            catch (Exception ex) { airAnchorArmed = null; MelonLogger.Warning("[QuestMods] AirGrab anchor failed: " + ex.Message); }
+            catch (Exception ex) { airAnchorArmed = null; MelonLogger.Warning("[HarmonyClient] AirGrab anchor failed: " + ex.Message); }
         }
 
         private static void CheckGrabPostfix(ClimbingHand __instance, bool __result)
@@ -3026,7 +3423,7 @@ namespace QuestMods
         {
             if (airAnchors.TryGetValue(hand.Pointer, out Component col) && col != null && !col.WasCollected)
                 return col;
-            GameObject go = new GameObject("QuestMods air anchor");
+            GameObject go = new GameObject("HarmonyClient air anchor");
             UnityEngine.Object.DontDestroyOnLoad(go);
             go.layer = layer;
             col = go.AddComponent(Il2CppInterop.Runtime.Il2CppType.From(sphereColType));
@@ -3241,6 +3638,8 @@ namespace QuestMods
             WristHudSceneLoaded();
             EspSceneLoaded();
             GraphicsSceneLoaded();
+            SkySceneLoaded();
+            makeDayType = null; makeDayTarget = null; makeDayLockUntil = -1f;
             LoggerInstance.Msg($"Scene loaded: '{sceneName}' ({buildIndex}). {Counts()}");
             try { TabletProbe.SceneLoaded(buildIndex, sceneName); DevWheelBridge.SceneLoaded(); }
             catch (Exception ex) { LoggerInstance.Warning("Tablet probe scene event: " + ex.Message); }
@@ -3266,7 +3665,7 @@ namespace QuestMods
         public static void Prefix(ref bool __1)
         {
             int n = Interlocked.Increment(ref calls); bool old = __1; __1 = true;
-            if (n <= 50 || n % 1000 == 0) MelonLogger.Msg($"[QuestMods] Initialize #{n}: isDev {old} -> {__1}");
+            if (n <= 50 || n % 1000 == 0) MelonLogger.Msg($"[HarmonyClient] Initialize #{n}: isDev {old} -> {__1}");
         }
     }
     public static class MenuDevPatch
@@ -3276,7 +3675,7 @@ namespace QuestMods
         public static void Postfix(ref bool __result)
         {
             int n = Interlocked.Increment(ref calls); bool old = __result; __result = true;
-            if (n <= 20 || n % 1000 == 0) MelonLogger.Msg($"[QuestMods] Menu IsDev #{n}: {old} -> {__result}");
+            if (n <= 20 || n % 1000 == 0) MelonLogger.Msg($"[HarmonyClient] Menu IsDev #{n}: {old} -> {__result}");
         }
     }
     public static class UserRolesPatch
@@ -3286,7 +3685,7 @@ namespace QuestMods
         public static void Postfix(ref bool __result)
         {
             int n = Interlocked.Increment(ref calls); bool old = __result; __result = true;
-            if (n <= 20 || n % 1000 == 0) MelonLogger.Msg($"[QuestMods] UserRoles IsDeveloper #{n}: {old} -> {__result}");
+            if (n <= 20 || n % 1000 == 0) MelonLogger.Msg($"[HarmonyClient] UserRoles IsDeveloper #{n}: {old} -> {__result}");
         }
     }
     public static class IgnoredPatch
@@ -3296,7 +3695,7 @@ namespace QuestMods
         public static void Postfix(ref bool __result)
         {
             int n = Interlocked.Increment(ref calls); bool old = __result; __result = false;
-            if (n <= 50 || n % 1000 == 0) MelonLogger.Msg($"[QuestMods] IsIgnored #{n}: {old} -> {__result}");
+            if (n <= 50 || n % 1000 == 0) MelonLogger.Msg($"[HarmonyClient] IsIgnored #{n}: {old} -> {__result}");
         }
     }
     public static class DebugMovementValidPatch
@@ -3306,7 +3705,7 @@ namespace QuestMods
         public static void Postfix(ref bool __result)
         {
             int n = Interlocked.Increment(ref calls); bool old = __result; __result = true;
-            if (n <= 20 || n % 1000 == 0) MelonLogger.Msg($"[QuestMods] Debug movement IsValid #{n}: {old} -> {__result}");
+            if (n <= 20 || n % 1000 == 0) MelonLogger.Msg($"[HarmonyClient] Debug movement IsValid #{n}: {old} -> {__result}");
         }
     }
 
@@ -3602,16 +4001,16 @@ namespace QuestMods
                     MelonLogger.Msg("[DevWheelBridge] Developer action: " + label);
                     if (existingNames.Add(label)) additions.Add(item);
                 }
-                if (!existingNames.Contains("Quest Mods"))
+                if (!existingNames.Contains("Harmony Client"))
                 {
                     // Install the optional wheel hook only after the player and
                     // controller exist in-game, never during game startup.
                     GrabbyHands.EnsureWheelHook();
-                    object custom = QuestModsMenu.TryCreate(devArray, dev);
+                    object custom = HarmonyClientMenu.TryCreate(devArray, dev);
                     if (custom != null)
                     {
                         additions.Add(custom);
-                        MelonLogger.Msg("[QuestModsMenu] Prepared Quest Mods submenu.");
+                        MelonLogger.Msg("[HarmonyClientMenu] Prepared Harmony Client submenu.");
                     }
                 }
                 if (additions.Count == 0) return;
@@ -3637,7 +4036,7 @@ namespace QuestMods
                 try
                 {
                     string rootName = (Read(entry, "DisplayName") ?? Read(entry, "displayName")) as string ?? "(unnamed)";
-                    object nest = QuestModsMenu.TryCast(entry, typeof(NestingMenuAction));
+                    object nest = HarmonyClientMenu.TryCast(entry, typeof(NestingMenuAction));
                     if (nest == null)
                     {
                         MelonLogger.Msg("[DevWheelBridge] " + rootName + ": not a castable nesting page.");
@@ -3694,9 +4093,9 @@ namespace QuestMods
         }
     }
 
-    // Experimental Quest Mods nested radial menu. This reuses the game's
+    // Experimental Harmony Client nested radial menu. This reuses the game's
     // native action assets, not an injected IL2CPP class or a custom tablet.
-    internal static class QuestModsMenu
+    internal static class HarmonyClientMenu
     {
         private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
         private static DateTime nextFailureLog = DateTime.MinValue;
@@ -3724,7 +4123,7 @@ namespace QuestMods
                     player = TryCast(player, playerType);
                     if (player == null)
                         throw new Exception("Player.Current proxy " + wrapperType + " could not be cast to " + playerType.FullName);
-                    MelonLogger.Msg("[QuestModsMenu] Converted Player.Current to " + playerType.FullName + ".");
+                    MelonLogger.Msg("[HarmonyClientMenu] Converted Player.Current to " + playerType.FullName + ".");
                 }
                 MethodInfo instantiate = unityObject.GetMethods(BindingFlags.Public | BindingFlags.Static)
                     .FirstOrDefault(m => m.Name == "Instantiate" && m.IsGenericMethodDefinition && m.GetGenericArguments().Length == 1 && m.GetParameters().Length == 1 && m.GetParameters()[0].ParameterType.IsGenericParameter);
@@ -3794,10 +4193,10 @@ namespace QuestMods
                         MelonLogger.Warning("[GrabbyHands] Could not create wheel toggle: " + ex);
                     }
                 }
-                if (pages.Count == 0) throw new Exception("No mod actions are available; cannot create empty Quest Mods menu.");
+                if (pages.Count == 0) throw new Exception("No mod actions are available; cannot create empty Harmony Client menu.");
                 object root = CloneNest(source, instantiate, spawnedProperty);
                 made.Add(root);
-                nameProperty.SetValue(root, "Quest Mods");
+                nameProperty.SetValue(root, "Harmony Client");
 
                 Type arrayType = devArray.GetType();
                 ConstructorInfo ctor = arrayType.GetConstructor(new[] { typeof(long) }) ?? arrayType.GetConstructor(new[] { typeof(int) });
@@ -3831,7 +4230,7 @@ namespace QuestMods
                     }
                     catch (Exception ex) { MelonLogger.Warning("[QuestDebugToggle] Native initialization/check failed: " + ex); }
                 }
-                MelonLogger.Msg($"[QuestModsMenu] Created Quest Mods wheel with {pages.Count} mod action(s).");
+                MelonLogger.Msg($"[HarmonyClientMenu] Created Harmony Client wheel with {pages.Count} mod action(s).");
                 return root;
             }
             catch (Exception ex)
@@ -3841,7 +4240,7 @@ namespace QuestMods
                 {
                     nextFailureLog = DateTime.UtcNow.AddSeconds(15);
                     if (ex is TargetInvocationException && ex.InnerException != null) ex = ex.InnerException;
-                    MelonLogger.Warning("[QuestModsMenu] Could not create submenu: " + ex);
+                    MelonLogger.Warning("[HarmonyClientMenu] Could not create submenu: " + ex);
                 }
                 return null;
             }
@@ -4009,7 +4408,7 @@ namespace QuestMods
                 if (smoothController == null) smoothController = Find("Il2Cpp.SmoothLocomotionPlayerController");
                 if (playerController == null || smoothController == null) return;
                 object current = Read(playerController, null, "Current", Stat);
-                object smooth = QuestModsMenu.TryCast(current, smoothController);
+                object smooth = HarmonyClientMenu.TryCast(current, smoothController);
                 if (smooth == null) return;
                 object locomotion = Read(smoothController, smooth, "SmoothLocomotion", Inst);
                 if (locomotion == null) return;
@@ -4582,21 +4981,21 @@ namespace QuestMods
                 object dock = null;
                 foreach (object item in unique.Values)
                 {
-                    object itemDock = QuestModsMenu.TryCast(item, dockType);
+                    object itemDock = HarmonyClientMenu.TryCast(item, dockType);
                     bool itemIsDock = itemDock != null;
                     if (itemDock == null)
                     {
                         object directPickup = null;
                         foreach (Type pickupType in pickupTypes)
                         {
-                            object possible = QuestModsMenu.TryCast(item, pickupType);
+                            object possible = HarmonyClientMenu.TryCast(item, pickupType);
                             if (possible != null && SafeRead(possible, "IsDocked") is bool state && state)
                             { directPickup = possible; break; }
                         }
                         if (directPickup == null)
                         { HoldLog("overlap contains non-docked/non-slot target name=" + (SafeRead(item, "name") ?? "unknown") + " proxy=" + item.GetType().FullName + "; no guess"); return true; }
                         object rawDock = SafeRead(directPickup, "Dock");
-                        itemDock = rawDock == null ? null : QuestModsMenu.TryCast(rawDock, dockType);
+                        itemDock = rawDock == null ? null : HarmonyClientMenu.TryCast(rawDock, dockType);
                         object content = itemDock == null ? null : SafeRead(itemDock, "DockedPickup");
                         if (itemDock == null || content == null || Id(content) != Id(directPickup))
                         { HoldLog("overlapping pickup is not the slot's verified current content; no guess"); return true; }
@@ -4639,7 +5038,7 @@ namespace QuestMods
                 MethodInfo onAttempt = t.GetMethods(I).FirstOrDefault(m => m.Name == "OnStartInteractionAttempt" &&
                     m.GetParameters().Length == 0 && m.ReturnType == typeof(void));
                 if (confirm == null || onAttempt == null) { HoldLog("native confirmation/attempt method unavailable"); return true; }
-                object arg = interactableType.IsInstanceOfType(target) ? target : QuestModsMenu.TryCast(target, interactableType);
+                object arg = interactableType.IsInstanceOfType(target) ? target : HarmonyClientMenu.TryCast(target, interactableType);
                 if (arg == null) { HoldLog("could not cast selected slot"); return true; }
                 HoldLog("unique slot=" + (SafeRead(dock, "name") ?? "unknown") + " quantity=" + amount +
                     "; requesting native confirmation; game will forward and undock if allowed");
