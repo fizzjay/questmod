@@ -2,7 +2,7 @@ HARMONY CLIENT PROJECT HANDOFF
 ==============================
 Prepared from the project conversation and the source files available in the workspace.
 Date: 2026-11-04
-Updated: 2026-11-20 (1.9.7 wrist HUD; 1.9.8 sight guards + ESP; 1.9.9 graphics overhaul; 1.9.10/1.9.11 compile fixes; 1.9.12 far detail; 1.9.13 terrain/shadows/lighting; 2.0.0 renamed + sky + P-Noclip; 2.1.0 Make Night + Performance Mode + noclip modes)
+Updated: 2026-11-20 (1.9.7 wrist HUD; 1.9.8 sight guards + ESP; 1.9.9 graphics overhaul; 1.9.10/1.9.11 compile fixes; 1.9.12 far detail; 1.9.13 terrain/shadows/lighting; 2.0.0 renamed + sky + P-Noclip; 2.1.0 Make Night + Performance Mode + noclip modes; 2.2.0 aura + grass overhaul)
 
 PURPOSE OF THIS FILE
 --------------------
@@ -14,7 +14,8 @@ Latest source: Class1.cs (QuestMods 1.9.7, includes the wrist HUD described belo
 Latest version actually tested by the user: Questmods_1.9.5.cs
 Status of 1.9.6: produced and statically checked for balanced delimiters only. It has NOT been compiled by the assistant or tested on the Quest. Do not describe it as verified or working on all slots.
 Status of 1.9.7: adds the wrist FPS / SAFE / NOT SAFE display. The user reported it works on their Quest.
-Status of 2.1.0 (current): 2.0.0 plus Make Night, Performance Mode, and P-Noclip modes (players / props+players / everything). Not compiled or tested here.
+Status of 2.2.0 (current): 2.1.0 plus the always-on purple aura (shell + orbiting pink/white/blue bits + point light) and the grass overhaul ported from the user's TownGrass mod, recoloured into the Harmony palette. Not compiled or tested here.
+Status of 2.1.0: 2.0.0 plus Make Night, Performance Mode, and P-Noclip modes (players / props+players / everything). Not compiled or tested here.
 Status of 2.0.0: the mod is renamed Harmony Client and adds the sky (3D stars + planets), the forearm display, P-Noclip, the purple tablet theme attempt, the Make Day fix and the night look. Not compiled or tested here.
 Status of 1.9.13: the user said the 1.9.12 look was "meh, terrain looks shitty" and that far objects and shadows/lighting needed real work, so 1.9.13 reworks the far-detail and lighting pass: terrain heightmapPixelError 1.2 + moderate basemapDistance (6000, NOT 100000), dense detail/trees, soft directional shadows with tighter cascades, three-colour ambient, sun intensity +12%, lodBias 6, and Max Detail (LOD 0) now defaults ON but distance-limited to 500m. New "Keep Post FX" toggle lets the game's grading/bloom survive while fog and blue-film overlays are still stripped. Not compiled or tested here.
 Status of 1.9.12: 1.9.11 plus far-detail work: 4000m default view, camera occlusion culling off, terrain basemap/heightmap fixed so distant ground keeps real detail, streaming mipmaps off, 9x anisotropy, and a separate "Max Detail (LOD 0)" toggle. Not compiled or tested here.
@@ -116,6 +117,25 @@ The file is still Class1.cs because the user's own project compiles this single 
 - P-Noclip modes: playerNoclipMode 0 = PLAYERS (the old per-collider Physics.IgnoreCollision behaviour), 1 = PROPS+PLAYERS (layer matrix, terrain layer excluded), 2 = EVERYTHING (layer matrix, terrain included - this is the default, per the user asking to noclip everything and not just terrain). SetLayerCollisionIgnores() records the previous value of every (playerLayer, otherLayer) pair with Physics.GetIgnoreLayerCollision before calling Physics.IgnoreLayerCollision and restores all of them when the toggle goes off or the mode changes. Player layers come from every Collider under PlayerController.Current. The layer matrix is global, so the restore list is also flushed on scene load.
 - Performance Mode: the user reports lag that is the same with the graphics overhaul on or off, so this targets CPU work, not visuals. While ON: Physics.autoSyncTransforms false (avoids a transform sync before every physics query), Time.fixedDeltaTime raised to 0.0333 (30Hz physics instead of 50Hz), QualitySettings.vSyncCount 0, Application.targetFrameRate 72, and SkinnedMeshRenderer.updateWhenOffscreen false for every skinned mesh found (rescanned every 8s, all restored on OFF). It also slows our own scans: sight guard 4Hz -> 2.5Hz, ESP 5Hz -> 2Hz, Max Detail 2s -> 6s, sky billboards 0.4s -> 0.9s. Everything is snapshotted in ApplyPerfMode and put back when the toggle is turned off.
 - Reminder: Time.fixedDeltaTime and the layer collision matrix are global engine state. Restoring them relies on the snapshot; if the game changes them afterwards, the snapshot is still what gets written back on toggle off.
+
+AURA AND GRASS IN 2.2.0 (UNTESTED ON QUEST)
+-------------------------------------------
+The user supplied the game's ShellAnimator / StatEffectShellAnimator / ShellSetting sources and their TownGrass mod, asking for a constant purple shell with pink/white/blue particles and a recoloured ("cool") grass, both always on.
+
+Aura (pref "Aura", default ON, NOT reset at launch):
+- Why it is not built on ShellAnimator: that class lives in Alta.PlayerEffects, which this project does not reference (the DayTimeManager error proved the Alta atmosphere assembly is not referenced either). It is also a per-character system driven by stat effects, not something to bolt a permanent shell onto.
+- Instead BuildAura() makes HarmonyClient_Aura with: a Sphere primitive scaled (1.5,1.7,1.5) at 1.05m as a translucent shell (Sprites/Default, alpha pulsing 0.10-0.16, renderQueue 3100, ZWrite off), 26 billboarded Quad "bits" in the palette pink (1,0.42,0.85), white, blue (0.45,0.65,1), purple (0.72,0.38,1) orbiting at radius 0.55-1.0m with per-bit phase/speed/bob and a size pulse, and a purple Point Light (range 5, intensity 1.2-1.55 pulsing, no shadows) so it actually lights the ground.
+- TickAura() runs every frame: it moves the root to PlayerController.Current.PlayerFeetPosition, pulses shell alpha and light colour/intensity, and updates the bit transforms at 20Hz (0.05s). All colliders destroyed, shadows off.
+- The palette is the same purple used by the arm display and the tablet theme, so the whole mod has one look.
+
+Grass overhaul (pref "Grass Overhaul", default ON, NOT reset at launch):
+- This is the user's TownGrass mod folded into Harmony Client, so they only run one DLL. It reads the same baked TGR4 grass data and rebuilds patches around the player: near 26m full detail, out to 70m with a 45% random blade subset, two patch builds per frame, only in a scene whose name contains "Overworld".
+- Data source order: UserData/TownGrass/grass.bin, then UserData/HarmonyClient/grass.bin, then the embedded "grass.bin" resource of any loaded assembly (i.e. TownGrass.dll). If none is found it logs once and stays off - it never throws.
+- DEFLATE is done through reflection on System.IO.Compression.DeflateStream(Stream, CompressionMode) so the project does not need a System.IO.Compression reference; the returned object is cast to System.IO.Stream and read normally.
+- Mesh building uses real managed arrays (Vector3[] / Color[] / int[]) and relies on Il2CppInterop's implicit T[] -> Il2CppStructArray<T> conversion when assigning Mesh.vertices / Mesh.colors / Mesh.triangles. If that ever fails to compile, the fallback is the TownGrass reflection+Marshal approach.
+- The "cool" recolour: vertex colours are lerped from a dark purple root (0.13,0.03,0.30) to a per-blade tip that mixes hot pink (1,0.42,0.88) and blue (0.42,0.66,1) by the blade's random byte, with a smoothstep height curve. Every mesh is doubled and the second copy has flipped winding, so blades are visible from both sides.
+- Materials: Shader.Find("Township Tale/Grass"), then Cheap/LitVertColor, then WindFoliageVertexColor, then Sprites/Default (unlit neon) as a guaranteed fallback. The game grass shader gets _Color pink-white, _DarkeningFactor 0.35, _Randomness 0.35, _SwayStrength 0.16 and _LightInfluence 1.6; the far material copies the no-sway shader.
+- BlendShader/towngrass.bundle is deliberately NOT used: the user is dropping it in UserData/TownGrass, but Shader.Find covers the built-in shaders, which is what the neon fallback is for.
 
 PROJECT GOAL AND USER REQUIREMENTS
 ----------------------------------

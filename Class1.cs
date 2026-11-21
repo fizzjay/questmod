@@ -1,4 +1,4 @@
-// Harmony Client 2.1.0 - wheel, HUD, sight guards, ESP, graphics, sky, P-Noclip, perf mode.
+// Harmony Client 2.2.0 - wheel, HUD, sight guards, ESP, graphics, sky, aura, grass, P-Noclip.
 // Wrist HUD: FPS plus SAFE / NOT SAFE based on nearby players and line of sight.
 // Sight guards: Disconnect / Turn Off / TP Away on sight. ESP: through-wall player highlight.
 // Graphics Overhaul: no fog, no blue film, full-res textures, long draw distance.
@@ -27,7 +27,7 @@ using MelonLoader.Utils;
 using TabletUILib;
 using UnityEngine;
 
-[assembly: MelonInfo(typeof(HarmonyClient.Mod), "Harmony Client", "2.1.0", "you")]
+[assembly: MelonInfo(typeof(HarmonyClient.Mod), "Harmony Client", "2.2.0", "you")]
 [assembly: MelonGame(null, null)]
 [assembly: MelonAdditionalDependencies("TabletUILib")]
 
@@ -41,7 +41,7 @@ namespace HarmonyClient
 
         public override void OnInitializeMelon()
         {
-            LoggerInstance.Msg("=== Harmony Client 2.1.0 ===");
+            LoggerInstance.Msg("=== Harmony Client 2.2.0 ===");
             PatchInitializers();
             GrabbyHands.Install(HarmonyInstance);
             PatchGetter(typeof(QuickAccessMenuAction), "IsDev", typeof(MenuDevPatch));
@@ -81,6 +81,8 @@ namespace HarmonyClient
         private static MelonPreferences_Entry<bool> prefKeepPostFx;
         private static MelonPreferences_Entry<bool> prefPlayerNoclip;
         private static MelonPreferences_Entry<bool> prefPerfMode;
+        private static MelonPreferences_Entry<bool> prefAura;
+        private static MelonPreferences_Entry<bool> prefGrass;
         private static bool lastPerfPref, perfApplied;
         private static bool lastPlayerNoclipPref;
         private static bool lastMaxDetailPref;
@@ -117,6 +119,9 @@ namespace HarmonyClient
             prefPlayerNoclip = category.CreateEntry("PlayerNoclip", false, "P-Noclip (No Clip)");
             // CPU-side performance mode: physics/transform/update savings, not visuals.
             prefPerfMode = category.CreateEntry("PerfMode", false, "Performance Mode");
+            // Aura is cosmetic and meant to be always on, so it is not reset at launch.
+            prefAura = category.CreateEntry("Aura", true, "Aura (Purple Shell + Particles)");
+            prefGrass = category.CreateEntry("GrassOverhaul", true, "Grass Overhaul");
 
             prefGrabbyHands.Value = false;
             prefSuperSpeed.Value = false;
@@ -188,6 +193,8 @@ namespace HarmonyClient
                 .Toggle("P-Noclip (no clip)", prefPlayerNoclip)
                 .Button("P-Noclip Mode: " + PlayerNoclipModeLabel(), () => CyclePlayerNoclipMode())
                 .Toggle("Performance Mode", prefPerfMode)
+                .Toggle("Aura (Purple Shell)", prefAura)
+                .Toggle("Grass Overhaul", prefGrass)
                 .Button("Bag Looking", () => ToggleStorage());
         }
 
@@ -206,6 +213,8 @@ namespace HarmonyClient
                 .Button("P-Noclip: everything / props / players only", () => { })
                 .Button("Performance Mode: CPU savings, not visuals", () => { })
                 .Button("Make Night: jump the day cycle to night", () => { })
+                .Button("Aura: purple shell + pink/white/blue bits", () => { })
+                .Button("Grass: recoloured blades from grass.bin", () => { })
                 .Button("Wrist HUD: FPS + SAFE / NOT SAFE", () => { })
                 .Button("Safe Range: how far 'around you' is", () => { })
                 .Button("Seen = clear sight + looking at you", () => { })
@@ -341,6 +350,10 @@ namespace HarmonyClient
             catch (Exception ex) { MelonLogger.Warning("[P-Noclip] tick failed: " + ex.Message); }
             try { TickSky(Camera.main); }
             catch (Exception ex) { MelonLogger.Warning("[Graphics] sky tick failed: " + ex.Message); }
+            try { TickAura(); }
+            catch (Exception ex) { MelonLogger.Warning("[Aura] tick failed: " + ex.Message); }
+            try { TickGrass(); }
+            catch (Exception ex) { MelonLogger.Warning("[Grass] tick failed: " + ex.Message); }
         }
 
         private static void ApplySuperSpeed(bool enabled)
@@ -1290,6 +1303,8 @@ namespace HarmonyClient
             yield return prefMaxDetail;
             yield return prefPlayerNoclip;
             yield return prefPerfMode;
+            yield return prefAura;
+            yield return prefGrass;
         }
 
         // Runs every frame from SyncTabletToggles, so a panic cannot be undone
@@ -3438,6 +3453,642 @@ namespace HarmonyClient
             return n.Contains("color") || n.Contains("colour") || n.Contains("accent") || n.Contains("theme") || n.Contains("tint");
         }
 
+        // --- Aura: constant purple shell with pink / white / blue bits ---------
+        // The game's own ShellAnimator lives in Alta.PlayerEffects, which this
+        // project does not reference, so the shell is rebuilt from primitives: a
+        // translucent sphere around the body, orbiting quads in the palette, and a
+        // purple point light so it actually lights nearby ground.
+        private class AuraBit
+        {
+            public Transform Tf;
+            public Material Mat;
+            public float Phase, Speed, Radius, Height, Size;
+            public int Palette;      // 0 pink, 1 white, 2 blue, 3 purple
+            public float SizePhase;
+        }
+
+        private static readonly Color[] auraPalette =
+        {
+            new Color(1f, 0.42f, 0.85f),   // pink
+            new Color(1f, 0.97f, 1f),      // white
+            new Color(0.45f, 0.65f, 1f),   // blue
+            new Color(0.72f, 0.38f, 1f)    // purple
+        };
+
+        private static GameObject auraRoot;
+        private static Renderer auraShell;
+        private static Material auraShellMat;
+        private static Light auraLight;
+        private static readonly List<AuraBit> auraBits = new List<AuraBit>();
+        private static float auraNextBit;
+
+        private static bool AuraOn => prefAura != null && prefAura.Value;
+
+        public static void AuraSceneLoaded()
+        {
+            if (auraRoot != null) UnityEngine.Object.Destroy(auraRoot);
+            auraRoot = null;
+            auraShell = null;
+            auraShellMat = null;
+            auraLight = null;
+            auraBits.Clear();
+            auraNextBit = 0f;
+        }
+
+        private static Material AuraMaterial(Color c)
+        {
+            Shader sh = Shader.Find("Sprites/Default") ?? Shader.Find("Unlit/Color");
+            if (sh == null) return null;
+            Material m = new Material(sh);
+            if (m.HasProperty("_Color")) m.SetColor("_Color", c);
+            else m.color = c;
+            m.renderQueue = 3100;
+            if (m.HasProperty("_ZWrite")) m.SetInt("_ZWrite", 0);
+            return m;
+        }
+
+        private static void BuildAura()
+        {
+            auraRoot = new GameObject("HarmonyClient_Aura");
+            auraShellMat = AuraMaterial(new Color(0.55f, 0.22f, 1f, 0.14f));
+            GameObject shell = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            shell.name = "HarmonyClient_AuraShell";
+            shell.transform.SetParent(auraRoot.transform, false);
+            shell.transform.localPosition = new Vector3(0f, 1.05f, 0f);
+            shell.transform.localScale = new Vector3(1.5f, 1.7f, 1.5f);
+            Collider shellCol = shell.GetComponent<Collider>();
+            if (shellCol != null) UnityEngine.Object.Destroy(shellCol);
+            auraShell = shell.GetComponent<Renderer>();
+            if (auraShell != null)
+            {
+                auraShell.material = auraShellMat;
+                auraShell.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                auraShell.receiveShadows = false;
+            }
+
+            var rng = new System.Random(2718);
+            for (int i = 0; i < 26; i++)
+            {
+                GameObject bit = GameObject.CreatePrimitive(PrimitiveType.Quad);
+                bit.name = "HarmonyClient_AuraBit";
+                bit.transform.SetParent(auraRoot.transform, false);
+                Collider bitCol = bit.GetComponent<Collider>();
+                if (bitCol != null) UnityEngine.Object.Destroy(bitCol);
+                Material mat = AuraMaterial(auraPalette[i % auraPalette.Length]);
+                Renderer r = bit.GetComponent<Renderer>();
+                if (r != null)
+                {
+                    r.material = mat;
+                    r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                    r.receiveShadows = false;
+                }
+                var a = new AuraBit
+                {
+                    Tf = bit.transform,
+                    Mat = mat,
+                    Phase = (float)(rng.NextDouble() * Math.PI * 2.0),
+                    Speed = 0.5f + (float)rng.NextDouble() * 1.1f,
+                    Radius = 0.55f + (float)rng.NextDouble() * 0.45f,
+                    Height = 0.75f + (float)rng.NextDouble() * 0.9f,
+                    Size = 0.030f + (float)rng.NextDouble() * 0.045f,
+                    SizePhase = (float)(rng.NextDouble() * Math.PI * 2.0),
+                    Palette = i % auraPalette.Length
+                };
+                auraBits.Add(a);
+            }
+
+            GameObject lightGo = new GameObject("HarmonyClient_AuraLight");
+            lightGo.transform.SetParent(auraRoot.transform, false);
+            lightGo.transform.localPosition = new Vector3(0f, 1.2f, 0f);
+            auraLight = lightGo.AddComponent<Light>();
+            auraLight.type = LightType.Point;
+            auraLight.color = new Color(0.72f, 0.42f, 1f);
+            auraLight.range = 5f;
+            auraLight.intensity = 1.4f;
+            auraLight.shadows = LightShadows.None;
+
+            MelonLogger.Msg("[Aura] Shell + " + auraBits.Count + " orbiting bits + purple light created.");
+        }
+
+        private static void TickAura()
+        {
+            if (!AuraOn)
+            {
+                if (auraRoot != null) AuraSceneLoaded();
+                return;
+            }
+            PlayerController pc = PlayerController.Current;
+            if (pc == null)
+            {
+                if (auraRoot != null && auraRoot.activeSelf) auraRoot.SetActive(false);
+                return;
+            }
+            if (auraRoot == null) BuildAura();
+            if (auraRoot == null) return;
+            if (!auraRoot.activeSelf) auraRoot.SetActive(true);
+
+            Vector3 feet = pc.PlayerFeetPosition;
+            auraRoot.transform.position = feet;
+
+            float t = Time.time;
+            if (auraShellMat != null)
+            {
+                Color shell = auraPalette[3];
+                float pulse = 0.10f + 0.06f * Mathf.Sin(t * 1.7f);
+                auraShellMat.SetColor("_Color", new Color(shell.r, shell.g, shell.b, pulse));
+            }
+            if (auraLight != null)
+            {
+                // subtle hue travel between purple and pink
+                float mix = 0.5f + 0.5f * Mathf.Sin(t * 0.9f);
+                auraLight.color = Color.Lerp(auraPalette[3], auraPalette[0], mix);
+                auraLight.intensity = 1.2f + 0.35f * Mathf.Sin(t * 2.3f);
+            }
+            if (Time.time < auraNextBit) return;
+            auraNextBit = Time.time + 0.05f;
+
+            Camera cam = Camera.main;
+            Vector3 eye = cam != null ? cam.transform.position : feet + Vector3.up * 1.5f;
+            for (int i = 0; i < auraBits.Count; i++)
+            {
+                AuraBit b = auraBits[i];
+                if (b == null || b.Tf == null) continue;
+                float ang = b.Phase + t * b.Speed;
+                float y = b.Height + Mathf.Sin(t * 1.6f + b.Phase) * 0.28f;
+                Vector3 local = new Vector3(Mathf.Cos(ang) * b.Radius, y, Mathf.Sin(ang) * b.Radius);
+                b.Tf.localPosition = local;
+                float size = b.Size * (0.7f + 0.5f * Mathf.Sin(t * 3f + b.SizePhase));
+                b.Tf.localScale = new Vector3(size, size, size);
+                Vector3 world = b.Tf.position;
+                Vector3 away = world - eye;
+                if (away.sqrMagnitude > 0.0001f)
+                    b.Tf.rotation = Quaternion.LookRotation(away, Vector3.up);
+            }
+        }
+
+        // --- Grass overhaul (grass data ported from the TownGrass mod) ----------
+        // Reads the baked TGR4 grass data and rebuilds visible patches around the
+        // player, then recolours the blades into the Harmony palette. The data is
+        // loaded from UserData/TownGrass/grass.bin, or from the embedded resource
+        // inside TownGrass.dll when that mod is also installed.
+        private class GrassPatch
+        {
+            public float MinX, MinY, MinZ, MaxX, MaxY, MaxZ;
+            public int Off, Len, Blades, Verts;
+            public bool Town;
+            public int Want = -1, Have = -1;
+            public GameObject Go;
+            public MeshFilter Filter;
+            public MeshRenderer Renderer;
+            public Mesh Mesh;
+            public bool Queued;
+        }
+
+        private class GrassBlades
+        {
+            public float[] Pos;
+            public byte[] H;
+            public byte[] Rnd;
+            public byte[] Cnt;
+        }
+
+        private const float GrassNearDistance = 26f;
+        private const float GrassFarDistance = 70f;
+        private const int GrassBuildsPerFrame = 2;
+
+        private static byte[] grassData;
+        private static int grassTableEnd;
+        private static List<GrassPatch> grassPatches;
+        private static readonly Queue<GrassPatch> grassTodo = new Queue<GrassPatch>();
+        private static GameObject grassRoot;
+        private static Material grassMatNear, grassMatFar;
+        private static float grassNextCheck;
+        private static bool grassTried, grassAnnounced, grassWarned;
+
+        private static bool GrassOn => prefGrass != null && prefGrass.Value;
+
+        public static void GrassSceneLoaded()
+        {
+            DestroyGrassRoot();
+            grassNextCheck = 0f;
+            grassTried = false;
+            grassAnnounced = false;
+            if (grassPatches != null)
+            {
+                foreach (GrassPatch p in grassPatches)
+                {
+                    if (p.Mesh != null) UnityEngine.Object.Destroy(p.Mesh);
+                    p.Mesh = null;
+                    p.Go = null;
+                    p.Filter = null;
+                    p.Renderer = null;
+                    p.Have = -1;
+                    p.Queued = false;
+                }
+            }
+        }
+
+        private static void DestroyGrassRoot()
+        {
+            if (grassRoot != null) UnityEngine.Object.Destroy(grassRoot);
+            grassRoot = null;
+            grassTodo.Clear();
+        }
+
+        private static bool InOverworldScene()
+        {
+            try
+            {
+                return UnityEngine.SceneManagement.SceneManager.GetActiveScene().name
+                    .IndexOf("Overworld", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+            catch { return false; }
+        }
+
+        private static bool EnsureGrassData()
+        {
+            if (grassPatches != null) return true;
+            if (grassTried) return false;
+            grassTried = true;
+            try
+            {
+                byte[] data = null;
+                try
+                {
+                    string path = Path.Combine(MelonEnvironment.UserDataDirectory, "TownGrass", "grass.bin");
+                    if (!File.Exists(path)) path = Path.Combine(MelonEnvironment.UserDataDirectory, "HarmonyClient", "grass.bin");
+                    if (File.Exists(path)) data = File.ReadAllBytes(path);
+                }
+                catch { }
+                if (data == null)
+                {
+                    foreach (Assembly a in AppDomain.CurrentDomain.GetAssemblies())
+                    {
+                        try
+                        {
+                            Stream res = a.GetManifestResourceStream("grass.bin");
+                            if (res == null) continue;
+                            using (var ms = new MemoryStream())
+                            {
+                                res.CopyTo(ms);
+                                data = ms.ToArray();
+                            }
+                            MelonLogger.Msg("[Grass] Using grass data embedded in " + a.GetName().Name + ".dll.");
+                            break;
+                        }
+                        catch { }
+                    }
+                }
+                if (data == null)
+                {
+                    MelonLogger.Msg("[Grass] No grass.bin found (UserData/TownGrass/grass.bin or embedded in TownGrass.dll); grass stays off.");
+                    return false;
+                }
+                grassData = data;
+                using (var br = new BinaryReader(new MemoryStream(data)))
+                {
+                    string magic = new string(br.ReadChars(4));
+                    if (magic != "TGR4") { MelonLogger.Warning("[Grass] grass.bin header is '" + magic + "', expected TGR4."); return false; }
+                    int count = br.ReadInt32();
+                    grassPatches = new List<GrassPatch>(count);
+                    for (int i = 0; i < count; i++)
+                    {
+                        GrassPatch gp = new GrassPatch
+                        {
+                            MinX = br.ReadSingle(), MinY = br.ReadSingle(), MinZ = br.ReadSingle(),
+                            MaxX = br.ReadSingle(), MaxY = br.ReadSingle(), MaxZ = br.ReadSingle(),
+                            Off = br.ReadInt32(), Len = br.ReadInt32(),
+                            Blades = br.ReadInt32(), Verts = br.ReadInt32()
+                        };
+                        gp.Town = (br.ReadInt32() & 1) != 0;
+                        grassPatches.Add(gp);
+                    }
+                    grassTableEnd = 8 + count * 44;
+                }
+                int town = 0;
+                foreach (GrassPatch gp in grassPatches) if (gp.Town) town++;
+                MelonLogger.Msg("[Grass] Loaded " + grassPatches.Count + " patches of baked grass (" + town + " in town).");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (!grassWarned) { grassWarned = true; MelonLogger.Warning("[Grass] load failed: " + ex.Message); }
+                return false;
+            }
+        }
+
+        private static Stream OpenInflater(byte[] src, int offset, int length)
+        {
+            Type ds = FindLoadedType("DeflateStream");
+            if (ds == null) throw new Exception("DeflateStream not available");
+            ConstructorInfo ctor = null;
+            foreach (ConstructorInfo c in ds.GetConstructors())
+            {
+                ParameterInfo[] ps = c.GetParameters();
+                if (ps.Length == 2 && ps[0].ParameterType == typeof(Stream) &&
+                    ps[1].ParameterType.IsEnum && ps[1].ParameterType.Name == "CompressionMode")
+                {
+                    ctor = c;
+                    break;
+                }
+            }
+            if (ctor == null) throw new Exception("DeflateStream(Stream, CompressionMode) not found");
+            object mode = Enum.ToObject(ctor.GetParameters()[1].ParameterType, 0); // Decompress
+            var mem = new MemoryStream(src, offset, length);
+            return (Stream)ctor.Invoke(new object[] { mem, mode });
+        }
+
+        private static GrassBlades UnpackGrass(GrassPatch pt)
+        {
+            int blades = pt.Blades;
+            int verts = pt.Verts;
+            int total = 28 + blades + blades * 6 + (verts - blades) * 3 + verts + blades;
+            byte[] buf = new byte[total];
+            int read = 0;
+            using (Stream inf = OpenInflater(grassData, grassTableEnd + pt.Off, pt.Len))
+            {
+                int n;
+                while (read < total && (n = inf.Read(buf, read, total - read)) > 0) read += n;
+            }
+            if (read != total) throw new Exception("grass patch unpacked to " + read + " of " + total + " bytes");
+
+            float ox = BitConverter.ToSingle(buf, 0);
+            float oy = BitConverter.ToSingle(buf, 4);
+            float oz = BitConverter.ToSingle(buf, 8);
+            float sx = BitConverter.ToSingle(buf, 12);
+            float sy = BitConverter.ToSingle(buf, 16);
+            float sz = BitConverter.ToSingle(buf, 20);
+            float step = BitConverter.ToSingle(buf, 24);
+
+            int p = 28;
+            var b = new GrassBlades
+            {
+                Pos = new float[verts * 3],
+                Cnt = new byte[blades],
+                H = new byte[verts],
+                Rnd = new byte[blades]
+            };
+            Buffer.BlockCopy(buf, p, b.Cnt, 0, blades);
+            p += blades;
+            int deltas = p;
+            p += blades * 6;
+            int offsets = p;
+            int extra = verts - blades;
+            p += extra * 3;
+            Buffer.BlockCopy(buf, p, b.H, 0, verts);
+            p += verts;
+            Buffer.BlockCopy(buf, p, b.Rnd, 0, blades);
+
+            int cx = 0, cy = 0, cz = 0, vi = 0, di = 0;
+            for (int i = 0; i < blades; i++)
+            {
+                cx = (cx + (buf[deltas + i * 2] | buf[deltas + i * 2 + 1] << 8)) & 65535;
+                cy = (cy + (buf[deltas + blades * 2 + i * 2] | buf[deltas + blades * 2 + i * 2 + 1] << 8)) & 65535;
+                cz = (cz + (buf[deltas + blades * 4 + i * 2] | buf[deltas + blades * 4 + i * 2 + 1] << 8)) & 65535;
+                float x = ox + cx * sx;
+                float y = oy + cy * sy;
+                float z = oz + cz * sz;
+                b.Pos[vi * 3] = x;
+                b.Pos[vi * 3 + 1] = y;
+                b.Pos[vi * 3 + 2] = z;
+                vi++;
+                for (int j = 1; j < b.Cnt[i]; j++)
+                {
+                    x += (sbyte)buf[offsets + di] * step;
+                    y += (sbyte)buf[offsets + extra + di] * step;
+                    z += (sbyte)buf[offsets + 2 * extra + di] * step;
+                    b.Pos[vi * 3] = x;
+                    b.Pos[vi * 3 + 1] = y;
+                    b.Pos[vi * 3 + 2] = z;
+                    vi++;
+                    di++;
+                }
+            }
+            return b;
+        }
+
+        private static float BladeSide(int j, int n)
+        {
+            if (j == n - 1) return 0f;
+            return (n - 2 - j) % 2 != 0 ? -1f : 1f;
+        }
+
+        // Palette: purple roots, pink tips, a share of blue tips for sparkle.
+        private static readonly Color GrassRoot = new Color(0.13f, 0.03f, 0.30f);
+        private static readonly Color GrassTipPink = new Color(1f, 0.42f, 0.88f);
+        private static readonly Color GrassTipBlue = new Color(0.42f, 0.66f, 1f);
+
+        private static Mesh BuildGrassMesh(GrassPatch pt, int lod)
+        {
+            GrassBlades b = UnpackGrass(pt);
+            int bladeCount = b.Cnt.Length;
+            var vertIndex = new List<int>(lod == 0 ? pt.Verts : bladeCount * 3);
+            var bladeIndex = new List<int>(vertIndex.Capacity);
+            var sides = new List<float>(vertIndex.Capacity);
+            var tris = new List<int>(lod == 0 ? (pt.Verts - 2 * bladeCount) * 3 : bladeCount * 3);
+            int keepCut = (int)(0.45f * 255f);
+
+            int v = 0;
+            for (int i = 0; i < bladeCount; i++)
+            {
+                int vc = b.Cnt[i];
+                int baseIndex = vertIndex.Count;
+                bool even = vc % 2 == 0;
+                if (lod == 0)
+                {
+                    for (int j = 0; j < vc; j++)
+                    {
+                        vertIndex.Add(v + j);
+                        bladeIndex.Add(i);
+                        sides.Add(BladeSide(j, vc));
+                    }
+                    for (int k = 0; k < vc - 2; k++)
+                    {
+                        if ((k % 2 == 0) != even)
+                        {
+                            tris.Add(baseIndex + k); tris.Add(baseIndex + k + 1); tris.Add(baseIndex + k + 2);
+                        }
+                        else
+                        {
+                            tris.Add(baseIndex + k + 2); tris.Add(baseIndex + k + 1); tris.Add(baseIndex + k);
+                        }
+                    }
+                }
+                else if (b.Rnd[i] <= keepCut)
+                {
+                    vertIndex.Add(v); bladeIndex.Add(i); sides.Add(BladeSide(0, vc));
+                    vertIndex.Add(v + 1); bladeIndex.Add(i); sides.Add(BladeSide(1, vc));
+                    vertIndex.Add(v + vc - 1); bladeIndex.Add(i); sides.Add(0f);
+                    if (!even)
+                    {
+                        tris.Add(baseIndex); tris.Add(baseIndex + 1); tris.Add(baseIndex + 2);
+                    }
+                    else
+                    {
+                        tris.Add(baseIndex + 2); tris.Add(baseIndex + 1); tris.Add(baseIndex);
+                    }
+                }
+                v += vc;
+            }
+
+            int count = vertIndex.Count;
+            var verts = new Vector3[count * 2];
+            var cols = new Color[count * 2];
+            var idx = new int[tris.Count * 2];
+
+            for (int i = 0; i < count; i++)
+            {
+                int vi = vertIndex[i];
+                verts[i] = new Vector3(b.Pos[vi * 3], b.Pos[vi * 3 + 1], b.Pos[vi * 3 + 2]);
+                float h = b.H[vi] / 255f;
+                float rnd = b.Rnd[bladeIndex[i]] / 255f;
+                Color tip = Color.Lerp(GrassTipPink, GrassTipBlue, rnd);
+                float curve = h * h * (3f - 2f * h);
+                cols[i] = Color.Lerp(GrassRoot, tip, curve);
+            }
+            tris.CopyTo(idx);
+
+            // Double sided: mirrored copy with flipped winding, so blades are
+            // never invisible from one side.
+            Array.Copy(verts, 0, verts, count, count);
+            Array.Copy(cols, 0, cols, count, count);
+            for (int i = 0; i < tris.Count; i += 3)
+            {
+                idx[tris.Count + i] = tris[i] + count;
+                idx[tris.Count + i + 1] = tris[i + 2] + count;
+                idx[tris.Count + i + 2] = tris[i + 1] + count;
+            }
+
+            Mesh mesh = new Mesh();
+            mesh.name = "HarmonyGrassPatch";
+            if (verts.Length > 65000) mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+            mesh.vertices = verts;
+            mesh.colors = cols;
+            mesh.triangles = idx;
+            mesh.RecalculateNormals();
+            mesh.RecalculateBounds();
+            return mesh;
+        }
+
+        private static void EnsureGrassMaterials()
+        {
+            if (grassMatNear != null) return;
+            Shader sh = Shader.Find("Township Tale/Grass");
+            string label = "game grass shader";
+            if (sh == null)
+            {
+                sh = Shader.Find("Township Tale/Cheap/LitVertColor");
+                label = "game lit vertex-colour shader";
+            }
+            if (sh == null)
+            {
+                sh = Shader.Find("Township Tale/WindFoliageVertexColor");
+                label = "game wind foliage shader";
+            }
+            if (sh == null)
+            {
+                sh = Shader.Find("Sprites/Default");
+                label = "unlit neon fallback (vertex colours)";
+            }
+            if (sh == null) { MelonLogger.Warning("[Grass] No usable shader found."); return; }
+            grassMatNear = new Material(sh);
+            grassMatNear.name = "HarmonyGrass";
+            if (grassMatNear.HasProperty("_Color")) grassMatNear.SetColor("_Color", new Color(1f, 0.75f, 1f));
+            if (grassMatNear.HasProperty("_DarkeningFactor")) grassMatNear.SetFloat("_DarkeningFactor", 0.35f);
+            if (grassMatNear.HasProperty("_Randomness")) grassMatNear.SetFloat("_Randomness", 0.35f);
+            if (grassMatNear.HasProperty("_SwayStrength")) grassMatNear.SetFloat("_SwayStrength", 0.16f);
+            if (grassMatNear.HasProperty("_ForwardSway")) grassMatNear.SetFloat("_ForwardSway", 0.2f);
+            if (grassMatNear.HasProperty("_BackwardSway")) grassMatNear.SetFloat("_BackwardSway", 0.077f);
+            if (grassMatNear.HasProperty("_LightInfluence")) grassMatNear.SetFloat("_LightInfluence", 1.6f);
+
+            Shader far = Shader.Find("Township Tale/Grass No Sway");
+            if (far == null) far = sh;
+            grassMatFar = new Material(far);
+            grassMatFar.name = "HarmonyGrassFar";
+            if (grassMatFar.HasProperty("_Color")) grassMatFar.SetColor("_Color", new Color(1f, 0.75f, 1f));
+            if (grassMatFar.HasProperty("_SwayStrength")) grassMatFar.SetFloat("_SwayStrength", 0f);
+            MelonLogger.Msg("[Grass] Using " + label + ".");
+        }
+
+        private static void ApplyGrassPatch(GrassPatch pt)
+        {
+            if (pt.Mesh != null) { UnityEngine.Object.Destroy(pt.Mesh); pt.Mesh = null; }
+            if (pt.Want < 0)
+            {
+                if (pt.Go != null) pt.Go.SetActive(false);
+                pt.Have = -1;
+                return;
+            }
+            if (pt.Go == null)
+            {
+                pt.Go = new GameObject("HarmonyClient_GrassPatch");
+                pt.Go.transform.SetParent(grassRoot.transform, false);
+                pt.Filter = pt.Go.AddComponent<MeshFilter>();
+                pt.Renderer = pt.Go.AddComponent<MeshRenderer>();
+                pt.Renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                pt.Renderer.receiveShadows = false;
+                pt.Renderer.lightProbeUsage = UnityEngine.Rendering.LightProbeUsage.Off;
+            }
+            EnsureGrassMaterials();
+            if (grassMatNear == null) return;
+            pt.Mesh = BuildGrassMesh(pt, pt.Want);
+            pt.Filter.sharedMesh = pt.Mesh;
+            pt.Renderer.sharedMaterial = pt.Want == 0 ? grassMatNear : grassMatFar;
+            pt.Go.SetActive(true);
+            pt.Have = pt.Want;
+            if (!grassAnnounced)
+            {
+                grassAnnounced = true;
+                MelonLogger.Msg("[Grass] Blades are showing around you.");
+            }
+        }
+
+        private static void TickGrass()
+        {
+            if (!GrassOn)
+            {
+                if (grassRoot != null) DestroyGrassRoot();
+                return;
+            }
+            PlayerController pc = PlayerController.Current;
+            if (pc == null) return;
+            float now = Time.time;
+            if (now >= grassNextCheck)
+            {
+                grassNextCheck = now + 0.5f;
+                if (!EnsureGrassData()) return;
+                if (!InOverworldScene()) { DestroyGrassRoot(); return; }
+                if (grassRoot == null)
+                {
+                    DestroyGrassRoot();
+                    grassRoot = new GameObject("HarmonyClient_Grass");
+                }
+                Vector3 eye = pc.PlayerFeetPosition;
+                float nearSq = GrassNearDistance * GrassNearDistance;
+                float farSq = GrassFarDistance * GrassFarDistance;
+                foreach (GrassPatch gp in grassPatches)
+                {
+                    float dx = Mathf.Max(Mathf.Max(gp.MinX - eye.x, 0f), eye.x - gp.MaxX);
+                    float dz = Mathf.Max(Mathf.Max(gp.MinZ - eye.z, 0f), eye.z - gp.MaxZ);
+                    float d = dx * dx + dz * dz;
+                    gp.Want = d < nearSq ? 0 : (d < farSq ? 1 : -1);
+                    if (gp.Want != gp.Have && !gp.Queued)
+                    {
+                        gp.Queued = true;
+                        grassTodo.Enqueue(gp);
+                    }
+                }
+            }
+            int built = 0;
+            while (built < GrassBuildsPerFrame && grassTodo.Count > 0)
+            {
+                GrassPatch gp = grassTodo.Dequeue();
+                gp.Queued = false;
+                if (gp.Want != gp.Have) ApplyGrassPatch(gp);
+                built++;
+            }
+        }
+
         private static void MakeDay()
         {
             try
@@ -3864,6 +4515,8 @@ namespace HarmonyClient
             EspSceneLoaded();
             GraphicsSceneLoaded();
             SkySceneLoaded();
+            AuraSceneLoaded();
+            GrassSceneLoaded();
             makeDayType = null; makeDayTarget = null; makeDayLockUntil = -1f;
             if (pnoclipLayers.Count > 0) RestorePlayerNoclip();
             playerNoclipLogged = false;
