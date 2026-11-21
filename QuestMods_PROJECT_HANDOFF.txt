@@ -2,7 +2,7 @@ QUESTMODS PROJECT HANDOFF
 ========================
 Prepared from the project conversation and the source files available in the workspace.
 Date: 2026-11-04
-Updated: 2026-11-20 (1.9.7 wrist HUD; 1.9.8 sight guards + ESP; 1.9.9 graphics overhaul; 1.9.10 compile fixes)
+Updated: 2026-11-20 (1.9.7 wrist HUD; 1.9.8 sight guards + ESP; 1.9.9 graphics overhaul; 1.9.10/1.9.11 compile fixes)
 
 PURPOSE OF THIS FILE
 --------------------
@@ -14,7 +14,8 @@ Latest source: Class1.cs (QuestMods 1.9.7, includes the wrist HUD described belo
 Latest version actually tested by the user: Questmods_1.9.5.cs
 Status of 1.9.6: produced and statically checked for balanced delimiters only. It has NOT been compiled by the assistant or tested on the Quest. Do not describe it as verified or working on all slots.
 Status of 1.9.7: adds the wrist FPS / SAFE / NOT SAFE display. The user reported it works on their Quest.
-Status of 1.9.10 (current): 1.9.9 with the compiler errors the user reported fixed (DayTimeManager, ParticleSystemRenderer, bare Il2CppType, unused GrabbyHands counters). Not compiled here; the user compiles in their own Unity/Quest project.
+Status of 1.9.11 (current): 1.9.10 plus the Il2CppSystem.Type fix in MakeDay (see the compile-fix section).
+Status of 1.9.10: 1.9.9 with the compiler errors the user reported fixed (DayTimeManager, ParticleSystemRenderer, bare Il2CppType, unused GrabbyHands counters). Not compiled here; the user compiles in their own Unity/Quest project.
 Status of 1.9.9: 1.9.8 plus the Graphics Overhaul toggle (see its own section). It has NOT been compiled or tested on the Quest here; only a C# syntax parse and whitespace check were possible.
 Status of 1.9.8: 1.9.7 plus sight guards (Disconnect / Turn Off / TP Away on Sight), player ESP through walls, and a box-free wrist display parented to the wrist with user-controlled side and tilt. It has NOT been compiled here and has NOT been tested on the Quest. Only C# syntax-parser and whitespace checks were available. All Grabby Hands caveats from 1.9.6 still apply.
 
@@ -45,7 +46,7 @@ Things to verify on-device for 1.9.8: that the parented (non-billboard) text sit
 COMPILE FIXES IN 1.9.10 (USER-REPORTED ERRORS)
 ---------------------------------------------
 The user compiles this file in their own project. Their compiler reported, and 1.9.10 fixes:
-- "The type or namespace name 'DayTimeManager' could not be found" -> MakeDay() no longer names the game type. It resolves it at runtime with FindLoadedType("DayTimeManager"), fetches the scene object with Object.FindObjectOfType(Type) and then sets field isUpdatingDaytime / calls UpdateRotation(0.25f, 0f) and UpdateAmbience() by reflection. Nothing changes for the user except that the "Make Day" button now logs a clear message if the type is absent.
+- "The type or namespace name 'DayTimeManager' could not be found" -> MakeDay() no longer names the game type at compile time. 1.9.11 additionally fixed "Argument 1: cannot convert from System.Type to Il2CppSystem.Type": in this IL2CPP interop build Object.FindObjectOfType(Type) and FindObjectsOfType(Type) take Il2CppSystem.Type, so MakeDay walks Object.FindObjectsOfType<MonoBehaviour>() and matches mb.GetType().Name == "DayTimeManager" instead. It then sets field isUpdatingDaytime and calls UpdateRotation(0.25f, 0f) / UpdateAmbience() by reflection. General rule: never pass a System.Type to a Unity API in this file; use a generic overload with a compile-time type, or Il2CppInterop.Runtime.Il2CppType.From(t) / Il2CppType.Of<T>() when the parameter really is Il2CppSystem.Type.
 - "The type or namespace name 'ParticleSystemRenderer' could not be found" -> the fog/mist scan now iterates Object.FindObjectsOfType<Renderer>() (UnityEngine.CoreModule) and still filters by GameObject name. Do not reintroduce ParticleSystemRenderer or ParticleSystem types; that module is not referenced in the user's project.
 - "The name 'Il2CppType' does not exist in the current context" (twice) -> two pre-existing AddComponent(Il2CppType.From(...)) calls used the bare name. Always write the fully qualified Il2CppInterop.Runtime.Il2CppType.From(...), because the user's project has no using for that namespace.
 - Warnings "field ... is assigned but its value is never used" / "is never used" for GrabbyHands.undockAttempts, seen, pickupLogs, insideUndock, earlyLogs -> those dead diagnostic counters were removed, along with every reset that touched them. If the user's compiler treats warnings as errors, do not add write-only fields.

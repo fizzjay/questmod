@@ -1,4 +1,4 @@
-// QuestMods 1.9.10 - wheel + wrist HUD + sight guards + player ESP + graphics overhaul.
+// QuestMods 1.9.11 - wheel + wrist HUD + sight guards + player ESP + graphics overhaul.
 // Wrist HUD: FPS plus SAFE / NOT SAFE based on nearby players and line of sight.
 // Sight guards: Disconnect / Turn Off / TP Away on sight. ESP: through-wall player highlight.
 // Graphics Overhaul: no fog, no blue film, full-res textures, long draw distance.
@@ -27,7 +27,7 @@ using MelonLoader.Utils;
 using TabletUILib;
 using UnityEngine;
 
-[assembly: MelonInfo(typeof(QuestMods.Mod), "QuestMods", "1.9.10", "you")]
+[assembly: MelonInfo(typeof(QuestMods.Mod), "QuestMods", "1.9.11", "you")]
 [assembly: MelonGame(null, null)]
 [assembly: MelonAdditionalDependencies("TabletUILib")]
 
@@ -41,7 +41,7 @@ namespace QuestMods
 
         public override void OnInitializeMelon()
         {
-            LoggerInstance.Msg("=== QuestMods 1.9.10: wheel + wrist HUD + sight guards + ESP + graphics ===");
+            LoggerInstance.Msg("=== QuestMods 1.9.11: wheel + wrist HUD + sight guards + ESP + graphics ===");
             PatchInitializers();
             GrabbyHands.Install(HarmonyInstance);
             PatchGetter(typeof(QuickAccessMenuAction), "IsDev", typeof(MenuDevPatch));
@@ -2568,15 +2568,25 @@ namespace QuestMods
         {
             try
             {
-                Type dayType = FindLoadedType("DayTimeManager");
-                if (dayType == null) { MelonLogger.Warning("[QuestMods] Make Day: DayTimeManager type not loaded."); return; }
-                UnityEngine.Object dtm = UnityEngine.Object.FindObjectOfType(dayType);
-                if (dtm == null) { MelonLogger.Warning("[QuestMods] Make Day: no DayTimeManager found in scene."); return; }
-                Type type = dayType;
+                // Object.FindObjectOfType(Type) needs Il2CppSystem.Type in this
+                // interop build, and the generic form needs the game type at
+                // compile time. Walking MonoBehaviours by name avoids both.
+                Type type = null;
+                UnityEngine.MonoBehaviour target = null;
+                foreach (UnityEngine.MonoBehaviour mb in UnityEngine.Object.FindObjectsOfType<UnityEngine.MonoBehaviour>())
+                {
+                    if (mb == null) continue;
+                    Type mt = mb.GetType();
+                    if (mt == null || mt.Name != "DayTimeManager") continue;
+                    type = mt;
+                    target = mb;
+                    break;
+                }
+                if (type == null || target == null) { MelonLogger.Warning("[QuestMods] Make Day: no DayTimeManager found in scene."); return; }
                 const BindingFlags flags = BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance;
-                type.GetField("isUpdatingDaytime", flags)?.SetValue(dtm, false);
-                type.GetMethod("UpdateRotation", flags)?.Invoke(dtm, new object[] { 0.25f, 0f });
-                type.GetMethod("UpdateAmbience", flags)?.Invoke(dtm, null);
+                type.GetField("isUpdatingDaytime", flags)?.SetValue(target, false);
+                type.GetMethod("UpdateRotation", flags)?.Invoke(target, new object[] { 0.25f, 0f });
+                type.GetMethod("UpdateAmbience", flags)?.Invoke(target, null);
                 MelonLogger.Msg("[QuestMods] Forced DayTimeManager to midday (client-side visual override only).");
             }
             catch (Exception ex) { MelonLogger.Warning("[QuestMods] MakeDay failed: " + ex.Message); }
