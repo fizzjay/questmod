@@ -1,4 +1,4 @@
-// Harmony Client 2.0.0 - wheel, HUD, sight guards, ESP, graphics overhaul, sky, P-Noclip.
+// Harmony Client 2.1.0 - wheel, HUD, sight guards, ESP, graphics, sky, P-Noclip, perf mode.
 // Wrist HUD: FPS plus SAFE / NOT SAFE based on nearby players and line of sight.
 // Sight guards: Disconnect / Turn Off / TP Away on sight. ESP: through-wall player highlight.
 // Graphics Overhaul: no fog, no blue film, full-res textures, long draw distance.
@@ -27,7 +27,7 @@ using MelonLoader.Utils;
 using TabletUILib;
 using UnityEngine;
 
-[assembly: MelonInfo(typeof(HarmonyClient.Mod), "Harmony Client", "2.0.0", "you")]
+[assembly: MelonInfo(typeof(HarmonyClient.Mod), "Harmony Client", "2.1.0", "you")]
 [assembly: MelonGame(null, null)]
 [assembly: MelonAdditionalDependencies("TabletUILib")]
 
@@ -41,7 +41,7 @@ namespace HarmonyClient
 
         public override void OnInitializeMelon()
         {
-            LoggerInstance.Msg("=== Harmony Client 2.0.0 ===");
+            LoggerInstance.Msg("=== Harmony Client 2.1.0 ===");
             PatchInitializers();
             GrabbyHands.Install(HarmonyInstance);
             PatchGetter(typeof(QuickAccessMenuAction), "IsDev", typeof(MenuDevPatch));
@@ -80,6 +80,8 @@ namespace HarmonyClient
         private static MelonPreferences_Entry<bool> prefMaxDetail;
         private static MelonPreferences_Entry<bool> prefKeepPostFx;
         private static MelonPreferences_Entry<bool> prefPlayerNoclip;
+        private static MelonPreferences_Entry<bool> prefPerfMode;
+        private static bool lastPerfPref, perfApplied;
         private static bool lastPlayerNoclipPref;
         private static bool lastMaxDetailPref;
         private static bool lastGrabbyPref, lastSpeedPref, lastFlyPref, lastNoclipPref, lastDurabilityPref;
@@ -112,7 +114,9 @@ namespace HarmonyClient
             prefKeepPostFx = category.CreateEntry("KeepPostFx", false, "Keep Post FX");
             // P-Noclip only removes collisions with other PLAYERS; terrain and
             // the world still stop you. The old layer-based Noclip is untouched.
-            prefPlayerNoclip = category.CreateEntry("PlayerNoclip", false, "P-Noclip (No Player Hit)");
+            prefPlayerNoclip = category.CreateEntry("PlayerNoclip", false, "P-Noclip (No Clip)");
+            // CPU-side performance mode: physics/transform/update savings, not visuals.
+            prefPerfMode = category.CreateEntry("PerfMode", false, "Performance Mode");
 
             prefGrabbyHands.Value = false;
             prefSuperSpeed.Value = false;
@@ -133,6 +137,7 @@ namespace HarmonyClient
             prefMaxDetail.Value = true;
             prefKeepPostFx.Value = false;
             prefPlayerNoclip.Value = false;
+            prefPerfMode.Value = false;
 
             InstallExtraPatches(HarmonyInstance);
 
@@ -157,6 +162,7 @@ namespace HarmonyClient
                 .Button("Grab Coins", () => GrabCoins())
                 .Button("Pouch Limit: " + (pouchLimit > 0 ? pouchLimit.ToString() : "OFF (100)"), () => CyclePouchLimit())
                 .Button("Make Day", () => MakeDay())
+                .Button("Make Night", () => MakeNight())
                 .Button("Player TPs", () => OpenPlayerTPs())
                 .Toggle("Air Grab", prefAirGrab)
                 .Toggle("Any Connect", prefAnyConnect)
@@ -179,7 +185,9 @@ namespace HarmonyClient
                 .Button("Overhaul Sharp: " + GraphicsSharpLabel(), () => CycleGraphicsSharp())
                 .Toggle("Max Detail (LOD 0)", prefMaxDetail)
                 .Toggle("Keep Post FX (bloom/contrast)", prefKeepPostFx)
-                .Toggle("P-Noclip (through players)", prefPlayerNoclip)
+                .Toggle("P-Noclip (no clip)", prefPlayerNoclip)
+                .Button("P-Noclip Mode: " + PlayerNoclipModeLabel(), () => CyclePlayerNoclipMode())
+                .Toggle("Performance Mode", prefPerfMode)
                 .Button("Bag Looking", () => ToggleStorage());
         }
 
@@ -195,7 +203,9 @@ namespace HarmonyClient
                 .Button("Overhaul Sharp: headset render scale", () => { })
                 .Button("Max Detail: force highest LOD everywhere", () => { })
                 .Button("Keep Post FX: leave grading, strip blue film", () => { })
-                .Button("P-Noclip: pass through players, terrain stays", () => { })
+                .Button("P-Noclip: everything / props / players only", () => { })
+                .Button("Performance Mode: CPU savings, not visuals", () => { })
+                .Button("Make Night: jump the day cycle to night", () => { })
                 .Button("Wrist HUD: FPS + SAFE / NOT SAFE", () => { })
                 .Button("Safe Range: how far 'around you' is", () => { })
                 .Button("Seen = clear sight + looking at you", () => { })
@@ -319,6 +329,14 @@ namespace HarmonyClient
                 if (!lastPlayerNoclipPref) RestorePlayerNoclip();
                 else playerNoclipNext = 0f;
             }
+
+            if (prefPerfMode != null && prefPerfMode.Value != lastPerfPref)
+            {
+                lastPerfPref = prefPerfMode.Value;
+                ApplyPerfMode(lastPerfPref);
+            }
+            try { TickPerfMode(); }
+            catch (Exception ex) { MelonLogger.Warning("[Perf] tick failed: " + ex.Message); }
             try { TickPlayerNoclip(); }
             catch (Exception ex) { MelonLogger.Warning("[P-Noclip] tick failed: " + ex.Message); }
             try { TickSky(Camera.main); }
@@ -1271,6 +1289,7 @@ namespace HarmonyClient
             yield return prefGraphics;
             yield return prefMaxDetail;
             yield return prefPlayerNoclip;
+            yield return prefPerfMode;
         }
 
         // Runs every frame from SyncTabletToggles, so a panic cannot be undone
@@ -1307,7 +1326,7 @@ namespace HarmonyClient
         private static void TickSightGuard()
         {
             if (Time.time < sightNextRefresh) { EnforceSightPanic(); return; }
-            sightNextRefresh = Time.time + WristRefreshSeconds;
+            sightNextRefresh = Time.time + (PerfOn ? 0.4f : WristRefreshSeconds);
             lastWristScan = ScanWristSafety();
             TickSightActions(lastWristScan);
             EnforceSightPanic();
@@ -1496,7 +1515,7 @@ namespace HarmonyClient
                 return;
             }
             if (Time.time < espNextRefresh) return;
-            espNextRefresh = Time.time + 0.2f;
+            espNextRefresh = Time.time + (PerfOn ? 0.5f : 0.2f);
             if (!EnsureEspMaterial())
             {
                 if (!espWarned) { espWarned = true; MelonLogger.Warning("[PlayerESP] through-wall shader unavailable; ESP disabled."); }
@@ -2239,7 +2258,7 @@ namespace HarmonyClient
             if (cam != null) skyRoot.transform.position = cam.transform.position;
             skyRoot.transform.Rotate(0f, 0.5f * Time.deltaTime, 0f, Space.World);
             if (Time.time < skyNextBillboard) return;
-            skyNextBillboard = Time.time + 0.4f;
+            skyNextBillboard = Time.time + (PerfOn ? 0.9f : 0.4f);
             if (cam == null) return;
             Vector3 eye = cam.transform.position;
             foreach (Transform tf in skyStarTf)
@@ -2465,7 +2484,7 @@ namespace HarmonyClient
         {
             if (prefMaxDetail == null || !prefMaxDetail.Value) return;
             if (Time.time < maxDetailNext) return;
-            maxDetailNext = Time.time + 2f;
+            maxDetailNext = Time.time + (PerfOn ? 6f : 2f);
             Type lodType = FindLoadedType("LODGroup");
             if (lodType == null) return;
             MethodInfo force = lodType.GetMethod("ForceLOD", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
@@ -3125,22 +3144,130 @@ namespace HarmonyClient
             catch (Exception ex) { MelonLogger.Warning("[HarmonyClient] TeleportLocalPlayer failed: " + ex.Message); }
         }
 
-        // --- P-Noclip: ignore other players only -------------------------------
-        // Physics.IgnoreCollision by collider pair, so terrain, buildings and props
-        // still collide exactly as before; only player-vs-player contact is off.
+        // --- Performance Mode: CPU-side savings, not visuals ---------------------
+        // The user reports lag that is identical with the graphics overhaul on or
+        // off, so this targets things that cost CPU every frame: automatic
+        // transform syncing before physics queries, a 30 Hz physics step instead
+        // of 50 Hz, offscreen skinned-mesh updates, and our own scan rates.
+        private static bool perfTracking;
+        private static bool savedAutoSync;
+        private static float savedFixedDelta;
+        private static int savedVSync, savedTargetFps;
+        private static float perfNextScan;
+        private static readonly List<SkinnedMeshRenderer> perfSkinned = new List<SkinnedMeshRenderer>();
+
+        private static bool PerfOn => prefPerfMode != null && prefPerfMode.Value;
+
+        private static void ApplyPerfMode(bool on)
+        {
+            try
+            {
+                if (on)
+                {
+                    if (!perfTracking)
+                    {
+                        savedAutoSync = Physics.autoSyncTransforms;
+                        savedFixedDelta = Time.fixedDeltaTime;
+                        savedVSync = QualitySettings.vSyncCount;
+                        savedTargetFps = Application.targetFrameRate;
+                        perfTracking = true;
+                    }
+                    Physics.autoSyncTransforms = false;
+                    if (Time.fixedDeltaTime < 0.0333f) Time.fixedDeltaTime = 0.0333f;
+                    QualitySettings.vSyncCount = 0;
+                    Application.targetFrameRate = 72;
+                    perfApplied = true;
+                    perfNextScan = 0f;
+                    MelonLogger.Msg("[Perf] ON: auto transform sync off, 30Hz physics, vsync off, 72fps target, offscreen skinned meshes culled.");
+                }
+                else
+                {
+                    if (perfTracking)
+                    {
+                        Physics.autoSyncTransforms = savedAutoSync;
+                        Time.fixedDeltaTime = savedFixedDelta;
+                        QualitySettings.vSyncCount = savedVSync;
+                        Application.targetFrameRate = savedTargetFps;
+                        perfTracking = false;
+                    }
+                    foreach (SkinnedMeshRenderer smr in perfSkinned)
+                    {
+                        if (smr == null) continue;
+                        try { smr.updateWhenOffscreen = true; } catch { }
+                    }
+                    perfSkinned.Clear();
+                    perfApplied = false;
+                    MelonLogger.Msg("[Perf] OFF: original timing restored.");
+                }
+            }
+            catch (Exception ex) { MelonLogger.Warning("[Perf] apply failed: " + ex.Message); }
+        }
+
+        private static void TickPerfMode()
+        {
+            if (!PerfOn || !perfApplied) return;
+            if (Time.time < perfNextScan) return;
+            perfNextScan = Time.time + 8f;
+            try
+            {
+                int n = 0;
+                foreach (SkinnedMeshRenderer smr in UnityEngine.Object.FindObjectsOfType<SkinnedMeshRenderer>())
+                {
+                    if (smr == null || !smr.updateWhenOffscreen) continue;
+                    smr.updateWhenOffscreen = false;
+                    perfSkinned.Add(smr);
+                    n++;
+                }
+                if (n > 0) MelonLogger.Msg("[Perf] Culled offscreen updates on " + n + " skinned mesh(es).");
+            }
+            catch (Exception ex) { MelonLogger.Warning("[Perf] skinned scan: " + ex.Message); }
+        }
+
+        // --- P-Noclip: layers / colliders --------------------------------------
+        // "Players" mode uses Physics.IgnoreCollision per collider pair; the other
+        // two modes drive the layer matrix (Physics.IgnoreLayerCollision) so props,
+        // buildings and - in EVERYTHING mode - the terrain are passed through too.
         private static float playerNoclipNext;
         private static bool playerNoclipLogged;
+        // 0 = players only, 1 = props and players (terrain stays solid),
+        // 2 = everything including terrain.
+        private static int playerNoclipMode = 2;
+        private static readonly List<(int Player, int Other, bool Previous)> pnoclipLayers =
+            new List<(int Player, int Other, bool Previous)>();
+
+        private static string PlayerNoclipModeLabel()
+        {
+            switch (playerNoclipMode)
+            {
+                case 0: return "PLAYERS";
+                case 1: return "PROPS+PLAYERS";
+                default: return "EVERYTHING";
+            }
+        }
+
+        private static void CyclePlayerNoclipMode()
+        {
+            playerNoclipMode = (playerNoclipMode + 1) % 3;
+            if (prefPlayerNoclip != null && prefPlayerNoclip.Value)
+            {
+                RestorePlayerNoclip();
+                playerNoclipNext = 0f;
+            }
+            MelonLogger.Msg("[P-Noclip] Mode: " + PlayerNoclipModeLabel());
+        }
 
         private static void TickPlayerNoclip()
         {
             if (prefPlayerNoclip == null || !prefPlayerNoclip.Value) return;
             if (Time.time < playerNoclipNext) return;
             playerNoclipNext = Time.time + 1f;
-            int pairs = SetPlayerCollisionIgnores(true);
+            int pairs = playerNoclipMode == 0
+                ? SetPlayerCollisionIgnores(true)
+                : SetLayerCollisionIgnores(true);
             if (pairs > 0 && !playerNoclipLogged)
             {
                 playerNoclipLogged = true;
-                MelonLogger.Msg("[P-Noclip] ON: ignoring " + pairs + " player collider pair(s); terrain still solid.");
+                MelonLogger.Msg("[P-Noclip] ON (" + PlayerNoclipModeLabel() + "): " + pairs + " collision pair(s) ignored.");
             }
         }
 
@@ -3148,8 +3275,71 @@ namespace HarmonyClient
         {
             playerNoclipNext = 0f;
             playerNoclipLogged = false;
-            int pairs = SetPlayerCollisionIgnores(false);
-            MelonLogger.Msg("[P-Noclip] OFF: player collisions restored (" + pairs + " pairs).");
+            int pairs = SetLayerCollisionIgnores(false) + SetPlayerCollisionIgnores(false);
+            MelonLogger.Msg("[P-Noclip] OFF: collisions restored (" + pairs + " pairs).");
+        }
+
+        private static List<int> PlayerColliderLayers(PlayerController pc)
+        {
+            var set = new HashSet<int>();
+            try
+            {
+                foreach (Collider c in pc.GetComponentsInChildren<Collider>(true))
+                    if (c != null) set.Add(c.gameObject.layer);
+            }
+            catch { }
+            if (set.Count == 0) set.Add(pc.gameObject.layer);
+            var list = new List<int>();
+            foreach (int l in set) list.Add(l);
+            return list;
+        }
+
+        // Layer-matrix noclip: used for "props and players" and "everything".
+        // The previous state of every layer pair is remembered so turning the
+        // toggle off restores exactly what the game had before.
+        private static int SetLayerCollisionIgnores(bool ignore)
+        {
+            PlayerController pc = PlayerController.Current;
+            if (pc == null) return 0;
+
+            if (!ignore)
+            {
+                int restored = 0;
+                foreach (var rec in pnoclipLayers)
+                {
+                    try { Physics.IgnoreLayerCollision(rec.Player, rec.Other, rec.Previous); restored++; } catch { }
+                }
+                pnoclipLayers.Clear();
+                return restored;
+            }
+
+            List<int> layers = PlayerColliderLayers(pc);
+            if (layers.Count == 0) return 0;
+            int terrainLayer = noclipTerrainLayer;
+            if (terrainLayer == -1 && MasterTerrain.Instance != null && MasterTerrain.Instance.Terrain != null)
+                terrainLayer = MasterTerrain.Instance.Terrain.gameObject.layer;
+
+            int changed = 0;
+            foreach (int playerLayer in layers)
+            {
+                for (int other = 0; other < 32; other++)
+                {
+                    if (playerNoclipMode == 1 && terrainLayer >= 0 && other == terrainLayer) continue;
+                    bool known = false;
+                    foreach (var rec in pnoclipLayers)
+                        if (rec.Player == playerLayer && rec.Other == other) { known = true; break; }
+                    if (known) continue;
+                    try
+                    {
+                        bool previous = Physics.GetIgnoreLayerCollision(playerLayer, other);
+                        Physics.IgnoreLayerCollision(playerLayer, other, true);
+                        pnoclipLayers.Add((playerLayer, other, previous));
+                        changed++;
+                    }
+                    catch { }
+                }
+            }
+            return changed;
         }
 
         private static int SetPlayerCollisionIgnores(bool ignore)
@@ -3269,10 +3459,12 @@ namespace HarmonyClient
                 if (type == null || target == null) { MelonLogger.Warning("[HarmonyClient] Make Day: no DayTimeManager found in scene."); return; }
                 makeDayType = type;
                 makeDayTarget = target;
+                makeDayProgress = 0.25f;
+                makeDayIsNight = false;
                 // The server re-syncs the fixed daytime flag, so hold the override
                 // for a few seconds or it snaps straight back to the server time.
                 makeDayLockUntil = Time.time + 10f;
-                if (ApplyMakeDay(type, target))
+                if (ApplyMakeDay(type, target, makeDayProgress, makeDayIsNight))
                     MelonLogger.Msg("[HarmonyClient] Forced midday (client-side visual override only).");
                 else
                     MelonLogger.Warning("[HarmonyClient] Make Day: DayTimeManager members not found on this build.");
@@ -3280,14 +3472,46 @@ namespace HarmonyClient
             catch (Exception ex) { MelonLogger.Warning("[HarmonyClient] MakeDay failed: " + ex.Message); }
         }
 
+        private static void MakeNight()
+        {
+            try
+            {
+                Type type = null;
+                UnityEngine.MonoBehaviour target = null;
+                foreach (UnityEngine.MonoBehaviour mb in UnityEngine.Object.FindObjectsOfType<UnityEngine.MonoBehaviour>())
+                {
+                    if (mb == null) continue;
+                    Type mt = mb.GetType();
+                    if (mt == null || mt.Name != "DayTimeManager") continue;
+                    type = mt;
+                    target = mb;
+                    break;
+                }
+                if (type == null || target == null) { MelonLogger.Warning("[HarmonyClient] Make Night: no DayTimeManager found in scene."); return; }
+                makeDayType = type;
+                makeDayTarget = target;
+                // 0.75 is inside the game's night window for the default 0.5 day ratio.
+                makeDayProgress = 0.75f;
+                makeDayIsNight = true;
+                makeDayLockUntil = Time.time + 10f;
+                if (ApplyMakeDay(type, target, makeDayProgress, makeDayIsNight))
+                    MelonLogger.Msg("[HarmonyClient] Forced night (client-side visual override only).");
+                else
+                    MelonLogger.Warning("[HarmonyClient] Make Night: DayTimeManager members not found on this build.");
+            }
+            catch (Exception ex) { MelonLogger.Warning("[HarmonyClient] MakeNight failed: " + ex.Message); }
+        }
+
         private static Type makeDayType;
         private static UnityEngine.Object makeDayTarget;
         private static float makeDayLockUntil = -1f;
+        private static float makeDayProgress = 0.25f;
+        private static bool makeDayIsNight;
 
         // Midday is dayProgress 0.25 (DayToNightRatio is 0.5 by default). Setting
         // isUpdatingDaytime false is what actually stops LateUpdate from putting
         // the old time straight back a frame later.
-        private static bool ApplyMakeDay(Type type, UnityEngine.Object target)
+        private static bool ApplyMakeDay(Type type, UnityEngine.Object target, float progress, bool isNightValue)
         {
             const BindingFlags flags = BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance;
             bool touched = false;
@@ -3305,7 +3529,7 @@ namespace HarmonyClient
             try
             {
                 MethodInfo rot = type.GetMethod("UpdateRotation", flags);
-                if (rot != null) { rot.Invoke(target, new object[] { 0.25f, 0f }); touched = true; }
+                if (rot != null) { rot.Invoke(target, new object[] { progress, 0f }); touched = true; }
             }
             catch (Exception ex) { MelonLogger.Warning("[HarmonyClient] Make Day rotation: " + ex.Message); }
             try
@@ -3317,9 +3541,10 @@ namespace HarmonyClient
             // Keep the game's static night flag in sync so night-only effects stop.
             try
             {
+                bool isNightHost = isNightValue;
                 Type gtm = FindLoadedType("GameTimeManager");
                 PropertyInfo isNight = gtm == null ? null : gtm.GetProperty("IsNight", BindingFlags.Public | BindingFlags.Static | BindingFlags.NonPublic);
-                if (isNight != null && isNight.CanWrite) isNight.SetValue(null, false);
+                if (isNight != null && isNight.CanWrite) isNight.SetValue(null, isNightHost);
             }
             catch { }
             return touched;
@@ -3329,7 +3554,7 @@ namespace HarmonyClient
         {
             if (Time.time > makeDayLockUntil) return;
             if (makeDayType == null || makeDayTarget == null) return;
-            ApplyMakeDay(makeDayType, makeDayTarget);
+            ApplyMakeDay(makeDayType, makeDayTarget, makeDayProgress, makeDayIsNight);
         }
 
         // --- Air Grab ---
@@ -3640,6 +3865,8 @@ namespace HarmonyClient
             GraphicsSceneLoaded();
             SkySceneLoaded();
             makeDayType = null; makeDayTarget = null; makeDayLockUntil = -1f;
+            if (pnoclipLayers.Count > 0) RestorePlayerNoclip();
+            playerNoclipLogged = false;
             LoggerInstance.Msg($"Scene loaded: '{sceneName}' ({buildIndex}). {Counts()}");
             try { TabletProbe.SceneLoaded(buildIndex, sceneName); DevWheelBridge.SceneLoaded(); }
             catch (Exception ex) { LoggerInstance.Warning("Tablet probe scene event: " + ex.Message); }

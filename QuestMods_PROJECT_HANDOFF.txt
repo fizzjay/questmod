@@ -2,7 +2,7 @@ HARMONY CLIENT PROJECT HANDOFF
 ==============================
 Prepared from the project conversation and the source files available in the workspace.
 Date: 2026-11-04
-Updated: 2026-11-20 (1.9.7 wrist HUD; 1.9.8 sight guards + ESP; 1.9.9 graphics overhaul; 1.9.10/1.9.11 compile fixes; 1.9.12 far detail; 1.9.13 terrain/shadows/lighting; 2.0.0 renamed to Harmony Client + sky + P-Noclip)
+Updated: 2026-11-20 (1.9.7 wrist HUD; 1.9.8 sight guards + ESP; 1.9.9 graphics overhaul; 1.9.10/1.9.11 compile fixes; 1.9.12 far detail; 1.9.13 terrain/shadows/lighting; 2.0.0 renamed + sky + P-Noclip; 2.1.0 Make Night + Performance Mode + noclip modes)
 
 PURPOSE OF THIS FILE
 --------------------
@@ -14,7 +14,8 @@ Latest source: Class1.cs (QuestMods 1.9.7, includes the wrist HUD described belo
 Latest version actually tested by the user: Questmods_1.9.5.cs
 Status of 1.9.6: produced and statically checked for balanced delimiters only. It has NOT been compiled by the assistant or tested on the Quest. Do not describe it as verified or working on all slots.
 Status of 1.9.7: adds the wrist FPS / SAFE / NOT SAFE display. The user reported it works on their Quest.
-Status of 2.0.0 (current): the mod is renamed Harmony Client and adds the sky (3D stars + planets), the forearm display, P-Noclip, the purple tablet theme attempt, the Make Day fix and the night look. Not compiled or tested here.
+Status of 2.1.0 (current): 2.0.0 plus Make Night, Performance Mode, and P-Noclip modes (players / props+players / everything). Not compiled or tested here.
+Status of 2.0.0: the mod is renamed Harmony Client and adds the sky (3D stars + planets), the forearm display, P-Noclip, the purple tablet theme attempt, the Make Day fix and the night look. Not compiled or tested here.
 Status of 1.9.13: the user said the 1.9.12 look was "meh, terrain looks shitty" and that far objects and shadows/lighting needed real work, so 1.9.13 reworks the far-detail and lighting pass: terrain heightmapPixelError 1.2 + moderate basemapDistance (6000, NOT 100000), dense detail/trees, soft directional shadows with tighter cascades, three-colour ambient, sun intensity +12%, lodBias 6, and Max Detail (LOD 0) now defaults ON but distance-limited to 500m. New "Keep Post FX" toggle lets the game's grading/bloom survive while fog and blue-film overlays are still stripped. Not compiled or tested here.
 Status of 1.9.12: 1.9.11 plus far-detail work: 4000m default view, camera occlusion culling off, terrain basemap/heightmap fixed so distant ground keeps real detail, streaming mipmaps off, 9x anisotropy, and a separate "Max Detail (LOD 0)" toggle. Not compiled or tested here.
 Status of 1.9.11: 1.9.10 plus the Il2CppSystem.Type fix in MakeDay (see the compile-fix section).
@@ -108,6 +109,13 @@ The file is still Class1.cs because the user's own project compiles this single 
 - P-Noclip: pref PlayerNoclip, "P-Noclip (through players)". It walks the local PlayerController's colliders against every other player's colliders and calls Physics.IgnoreCollision(a, b, true) in both directions of the pair, refreshed once a second so new players are covered. Terrain, buildings and props keep their collisions, and the existing layer-based Noclip toggle is untouched. Turning it off calls the same walk with false.
 - Purple tablet: ApplyTabletTheme() scans the TabletUILib assembly (and live tablet MonoBehaviours) for any Color member whose name mentions color/colour/accent/theme/tint and sets it to (0.55,0.25,0.95). If TabletUILib exposes no such hook it logs that and leaves the tablet alone - there is no documented theme API, so this is best effort, not a guarantee.
 - P-Noclip and the graphics/detail toggles are all part of the "Turn Off on Sight" panic set.
+
+2.1.0 ADDITIONS
+--------------
+- Make Night: same reflection path as Make Day but with dayProgress 0.75 and GameTimeManager.IsNight pushed to true. ApplyMakeDay(type, target, progress, isNight) now takes the time as a parameter; makeDayProgress / makeDayIsNight are stored so the 10s hold re-applies the same time.
+- P-Noclip modes: playerNoclipMode 0 = PLAYERS (the old per-collider Physics.IgnoreCollision behaviour), 1 = PROPS+PLAYERS (layer matrix, terrain layer excluded), 2 = EVERYTHING (layer matrix, terrain included - this is the default, per the user asking to noclip everything and not just terrain). SetLayerCollisionIgnores() records the previous value of every (playerLayer, otherLayer) pair with Physics.GetIgnoreLayerCollision before calling Physics.IgnoreLayerCollision and restores all of them when the toggle goes off or the mode changes. Player layers come from every Collider under PlayerController.Current. The layer matrix is global, so the restore list is also flushed on scene load.
+- Performance Mode: the user reports lag that is the same with the graphics overhaul on or off, so this targets CPU work, not visuals. While ON: Physics.autoSyncTransforms false (avoids a transform sync before every physics query), Time.fixedDeltaTime raised to 0.0333 (30Hz physics instead of 50Hz), QualitySettings.vSyncCount 0, Application.targetFrameRate 72, and SkinnedMeshRenderer.updateWhenOffscreen false for every skinned mesh found (rescanned every 8s, all restored on OFF). It also slows our own scans: sight guard 4Hz -> 2.5Hz, ESP 5Hz -> 2Hz, Max Detail 2s -> 6s, sky billboards 0.4s -> 0.9s. Everything is snapshotted in ApplyPerfMode and put back when the toggle is turned off.
+- Reminder: Time.fixedDeltaTime and the layer collision matrix are global engine state. Restoring them relies on the snapshot; if the game changes them afterwards, the snapshot is still what gets written back on toggle off.
 
 PROJECT GOAL AND USER REQUIREMENTS
 ----------------------------------
