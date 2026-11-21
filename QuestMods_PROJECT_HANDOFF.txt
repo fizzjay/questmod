@@ -2,7 +2,7 @@ QUESTMODS PROJECT HANDOFF
 ========================
 Prepared from the project conversation and the source files available in the workspace.
 Date: 2026-11-04
-Updated: 2026-11-20 (1.9.7 wrist HUD; 1.9.8 sight guards + ESP; 1.9.9 graphics overhaul; 1.9.10/1.9.11 compile fixes)
+Updated: 2026-11-20 (1.9.7 wrist HUD; 1.9.8 sight guards + ESP; 1.9.9 graphics overhaul; 1.9.10/1.9.11 compile fixes; 1.9.12 far-detail work)
 
 PURPOSE OF THIS FILE
 --------------------
@@ -14,7 +14,8 @@ Latest source: Class1.cs (QuestMods 1.9.7, includes the wrist HUD described belo
 Latest version actually tested by the user: Questmods_1.9.5.cs
 Status of 1.9.6: produced and statically checked for balanced delimiters only. It has NOT been compiled by the assistant or tested on the Quest. Do not describe it as verified or working on all slots.
 Status of 1.9.7: adds the wrist FPS / SAFE / NOT SAFE display. The user reported it works on their Quest.
-Status of 1.9.11 (current): 1.9.10 plus the Il2CppSystem.Type fix in MakeDay (see the compile-fix section).
+Status of 1.9.12 (current): 1.9.11 plus far-detail work: 4000m default view, camera occlusion culling off, terrain basemap/heightmap fixed so distant ground keeps real detail, streaming mipmaps off, 9x anisotropy, and a separate "Max Detail (LOD 0)" toggle. Not compiled or tested here.
+Status of 1.9.11: 1.9.10 plus the Il2CppSystem.Type fix in MakeDay (see the compile-fix section).
 Status of 1.9.10: 1.9.9 with the compiler errors the user reported fixed (DayTimeManager, ParticleSystemRenderer, bare Il2CppType, unused GrabbyHands counters). Not compiled here; the user compiles in their own Unity/Quest project.
 Status of 1.9.9: 1.9.8 plus the Graphics Overhaul toggle (see its own section). It has NOT been compiled or tested on the Quest here; only a C# syntax parse and whitespace check were possible.
 Status of 1.9.8: 1.9.7 plus sight guards (Disconnect / Turn Off / TP Away on Sight), player ESP through walls, and a box-free wrist display parented to the wrist with user-controlled side and tilt. It has NOT been compiled here and has NOT been tested on the Quest. Only C# syntax-parser and whitespace checks were available. All Grabby Hands caveats from 1.9.6 still apply.
@@ -57,20 +58,23 @@ GRAPHICS OVERHAUL ADDED IN 1.9.9 (UNTESTED ON QUEST)
 ----------------------------------------------------
 User request: "add a graphic overhaul toggle with everything you can think of to make the game look amazing no fog no blue film etc."
 
-One toggle, "Graphics Overhaul", on the Quest Mods tablet page, plus two buttons: "Overhaul View" (camera far plane 1500/2500/4000m, default 2500) and "Overhaul Sharp" (headset render scale 1.00/1.15/1.30/1.50x, default 1.00x).
+One toggle, "Graphics Overhaul", on the Quest Mods tablet page, plus two buttons: "Overhaul View" (camera far plane 4000/6000/2500/1500m, default 4000 - the user asked for 4000 out of the box) and "Overhaul Sharp" (headset render scale 1.00/1.15/1.30/1.50x, default 1.15x). A second, separate toggle "Max Detail (LOD 0)" forces the highest-detail mesh on every LODGroup (default OFF because it is expensive).
 
 What it changes while ON (everything is snapshotted first and restored when it turns OFF):
 - Fog: RenderSettings.fog off, density 0, start/end 100000. This is what removes the milky blue distance haze.
 - Ambient/blue tint: ambientIntensity 1.35, reflectionIntensity 1.15, and when ambient mode is Flat the ambient colour is reset to a neutral (0.62,0.64,0.68) instead of the cold blue; skybox _Exposure raised to 1.25 when the sky material has it.
-- Quality: masterTextureLimit 0 (full-res textures), maximumLODLevel 0, lodBias 2.5, anisotropicFiltering ForceEnable, pixelLightCount 8, antiAliasing 4, shadowDistance 160, shadowCascades 4, shadowResolution VeryHigh, shadowProjection CloseFit, softParticles/softVegetation/realtimeReflectionProbes/billboardsFaceCameraPosition on, particleRaycastBudget 4096, skinWeights FourBones. All of these go through reflection (QualitySettings property names) so a missing member on this Unity version cannot break the build.
-- Cameras: every CameraType.Game camera gets allowHDR/allowMSAA on, farClipPlane raised to the Overhaul View value, and SolidColor clear flags switched to Skybox. The near plane is deliberately NOT touched (a smaller near plane costs depth precision and causes z-fighting).
+- Quality: masterTextureLimit 0 (full-res textures), maximumLODLevel 0, lodBias 4 (distant props keep their high-detail mesh much further out), anisotropicFiltering ForceEnable, pixelLightCount 8, antiAliasing 4, shadowDistance 200, shadowCascades 4, shadowResolution VeryHigh, shadowProjection CloseFit, softParticles/softVegetation/realtimeReflectionProbes/billboardsFaceCameraPosition on, particleRaycastBudget 4096, skinWeights FourBones, streamingMipmapsActive off. Texture.SetGlobalAnisotropicFilteringLimits(9, 9) is also called so ground and road textures stay sharp at an angle. All of these go through reflection (QualitySettings property names) so a missing member on this Unity version cannot break the build.
+- Cameras: every CameraType.Game camera gets allowHDR/allowMSAA on, farClipPlane raised to the Overhaul View value, useOcclusionCulling turned OFF (occlusion culling is what makes far geometry and whole chunks pop out of existence before you reach them), and SolidColor clear flags switched to Skybox. The near plane is deliberately NOT touched (a smaller near plane costs depth precision and causes z-fighting).
 - Headset: XRSettings.eyeTextureResolutionScale set to the Overhaul Sharp value and renderViewportScale 1.0, both by reflection through FindLoadedType("XRSettings") so there is no XR assembly reference.
 - Post-processing / colour grading / overlays: scene MonoBehaviours are matched by type name (exact list plus short distinctive fragments like "fog", "postprocess", "colorgrading", "tonemap", "vignette", "bloom", "ambientocclusion") and disabled; renderers in the camera hierarchy and particle renderers whose GameObject name contains fog/mist/haze/tint/vignette/overlay/underwater are hidden. Every disabled component is logged as "[Graphics] Disabled <Type> on '<object>'" and re-enabled on toggle off. Nothing named QuestMods_* is touched, and ambiguous words like plain "tint" are only used for renderer names, never for gameplay scripts (item tinting).
 - Re-applied every 2 seconds while ON so the game's own scene scripts cannot switch fog/texture limits back on. Scene loads re-scan for new volumes and re-apply the core settings.
 
 Safety: all of it is client-side visuals. Nothing is sent to other players. Turning the toggle OFF restores the snapshotted fog, ambient, camera, quality and XR values and re-enables every component/renderer it disabled. The toggle is also part of the "Turn Off on Sight" panic set, so a panic returns the original visuals too.
 
-Known trade-offs / things to verify on-device: full-res textures + 160m shadows + bigger far plane cost GPU time, so watch the wrist FPS readout and lower "Overhaul Sharp" first if it drops; disabling the global post-process Volume removes bloom as well as the blue tint (ask for a sub-toggle if bloom should stay); "antiAliasing" is usually fixed at startup on Quest and may be ignored; if a wanted visual effect is disabled by the name scan, its "[Graphics] Disabled ..." log line names it.
+- Far-detail work (1.9.12, the "far away things look bad" complaint): ApplyTerrainBoost() finds the Terrain type by reflection, gets every terrain with FindObjectsOfType(Il2CppType.From(terrainType)) and, per terrain, snapshots then sets basemapDistance 100000, heightmapMaximumLOD 0, detailObjectDistance 450, treeDistance 4000, treeBillboardDistance 2000, treeMaximumFullLODCount 1200, drawTreesAndFoliage true. Unity normally switches distant terrain to a low-res basemap and a coarse heightmap LOD, which is exactly why far hills looked flat and blurry; raising both keeps the real terrain shader and full geometry far out. All original values are captured in TerrainSnap and written back on toggle off. Terrain and LODGroup are never named at compile time (only through FindLoadedType + Il2CppType.From) so no new assembly reference is needed.
+- Max Detail (LOD 0): TickMaxDetail() re-forces LODGroup.ForceLOD(0) on every group every 2s while the toggle is on, and RestoreMaxDetail() walks the groups again with ForceLOD(-1) when it is turned off. Reflection only, as above.
+
+Known trade-offs / things to verify on-device: full-res textures + 200m shadows + a 4000m far plane + occlusion culling off cost GPU time (and the extra geometry is the single biggest cost), so watch the wrist FPS readout and lower "Overhaul Sharp" first, then "Overhaul View", if it drops, so watch the wrist FPS readout and lower "Overhaul Sharp" first if it drops; disabling the global post-process Volume removes bloom as well as the blue tint (ask for a sub-toggle if bloom should stay); "antiAliasing" is usually fixed at startup on Quest and may be ignored; if a wanted visual effect is disabled by the name scan, its "[Graphics] Disabled ..." log line names it.
 
 PROJECT GOAL AND USER REQUIREMENTS
 ----------------------------------

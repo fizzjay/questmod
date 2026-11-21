@@ -1,4 +1,4 @@
-// QuestMods 1.9.11 - wheel + wrist HUD + sight guards + player ESP + graphics overhaul.
+// QuestMods 1.9.12 - wheel + wrist HUD + sight guards + player ESP + graphics overhaul.
 // Wrist HUD: FPS plus SAFE / NOT SAFE based on nearby players and line of sight.
 // Sight guards: Disconnect / Turn Off / TP Away on sight. ESP: through-wall player highlight.
 // Graphics Overhaul: no fog, no blue film, full-res textures, long draw distance.
@@ -27,7 +27,7 @@ using MelonLoader.Utils;
 using TabletUILib;
 using UnityEngine;
 
-[assembly: MelonInfo(typeof(QuestMods.Mod), "QuestMods", "1.9.11", "you")]
+[assembly: MelonInfo(typeof(QuestMods.Mod), "QuestMods", "1.9.12", "you")]
 [assembly: MelonGame(null, null)]
 [assembly: MelonAdditionalDependencies("TabletUILib")]
 
@@ -41,7 +41,7 @@ namespace QuestMods
 
         public override void OnInitializeMelon()
         {
-            LoggerInstance.Msg("=== QuestMods 1.9.11: wheel + wrist HUD + sight guards + ESP + graphics ===");
+            LoggerInstance.Msg("=== QuestMods 1.9.12: wheel + wrist HUD + sight guards + ESP + graphics ===");
             PatchInitializers();
             GrabbyHands.Install(HarmonyInstance);
             PatchGetter(typeof(QuickAccessMenuAction), "IsDev", typeof(MenuDevPatch));
@@ -77,6 +77,8 @@ namespace QuestMods
         private static MelonPreferences_Entry<bool> prefTpAwayOnSight;
         private static MelonPreferences_Entry<bool> prefPlayerEsp;
         private static MelonPreferences_Entry<bool> prefGraphics;
+        private static MelonPreferences_Entry<bool> prefMaxDetail;
+        private static bool lastMaxDetailPref;
         private static bool lastGrabbyPref, lastSpeedPref, lastFlyPref, lastNoclipPref, lastDurabilityPref;
 
         private void InitTabletUI()
@@ -101,6 +103,7 @@ namespace QuestMods
             prefTpAwayOnSight = category.CreateEntry("TpAwayOnSight", false, "TP Away on Sight");
             prefPlayerEsp = category.CreateEntry("PlayerEsp", false, "Player ESP (Thru Walls)");
             prefGraphics = category.CreateEntry("GraphicsOverhaul", false, "Graphics Overhaul");
+            prefMaxDetail = category.CreateEntry("MaxDetail", false, "Max Detail (LOD 0)");
 
             prefGrabbyHands.Value = false;
             prefSuperSpeed.Value = false;
@@ -118,6 +121,7 @@ namespace QuestMods
             prefTpAwayOnSight.Value = false;
             prefPlayerEsp.Value = false;
             prefGraphics.Value = false;
+            prefMaxDetail.Value = false;
 
             InstallExtraPatches(HarmonyInstance);
 
@@ -160,6 +164,7 @@ namespace QuestMods
                 .Toggle("Graphics Overhaul", prefGraphics)
                 .Button("Overhaul View: " + graphicsRanges[graphicsRangeIndex] + "m", () => CycleGraphicsRange())
                 .Button("Overhaul Sharp: " + GraphicsSharpLabel(), () => CycleGraphicsSharp())
+                .Toggle("Max Detail (LOD 0)", prefMaxDetail)
                 .Button("Bag Looking", () => ToggleStorage());
         }
 
@@ -173,6 +178,7 @@ namespace QuestMods
                 .Button("Graphics Overhaul: no fog, no blue film", () => { })
                 .Button("Overhaul View: camera draw distance", () => { })
                 .Button("Overhaul Sharp: headset render scale", () => { })
+                .Button("Max Detail: force highest LOD everywhere", () => { })
                 .Button("Wrist HUD: FPS + SAFE / NOT SAFE", () => { })
                 .Button("Safe Range: how far 'around you' is", () => { })
                 .Button("Seen = clear sight + looking at you", () => { })
@@ -247,6 +253,13 @@ namespace QuestMods
                 ApplyGraphicsOverhaul(graphicsAppliedPref);
             }
 
+            if (prefMaxDetail != null && prefMaxDetail.Value != lastMaxDetailPref)
+            {
+                lastMaxDetailPref = prefMaxDetail.Value;
+                if (!lastMaxDetailPref) RestoreMaxDetail();
+                else maxDetailNext = 0f;
+            }
+
             if (prefDurability != null)
             {
                 if (prefDurability.Value != lastDurabilityPref)
@@ -278,6 +291,8 @@ namespace QuestMods
             catch (Exception ex) { MelonLogger.Warning("[PlayerESP] tick failed: " + ex.Message); }
             try { TickGraphicsOverhaul(); }
             catch (Exception ex) { MelonLogger.Warning("[Graphics] tick failed: " + ex.Message); }
+            try { TickMaxDetail(); }
+            catch (Exception ex) { MelonLogger.Warning("[Graphics] detail tick failed: " + ex.Message); }
         }
 
         private static void ApplySuperSpeed(bool enabled)
@@ -1216,6 +1231,7 @@ namespace QuestMods
             yield return prefMakePearl;
             yield return prefPlayerEsp;
             yield return prefGraphics;
+            yield return prefMaxDetail;
         }
 
         // Runs every frame from SyncTabletToggles, so a panic cannot be undone
@@ -1530,7 +1546,7 @@ namespace QuestMods
         // --- Graphics Overhaul: no fog, no blue film, clean long-view image ----
         // Client-side visuals only. Every value changed here is snapshotted and
         // restored when the toggle is turned off or Escape turns all mods off.
-        private static readonly int[] graphicsRanges = { 1500, 2500, 4000 };
+        private static readonly int[] graphicsRanges = { 4000, 6000, 2500, 1500 };
         private static readonly float[] graphicsSharpness = { 1f, 1.15f, 1.3f, 1.5f };
         private static readonly string[] graphicsQualityKeys =
         {
@@ -1538,10 +1554,10 @@ namespace QuestMods
             "pixelLightCount", "antiAliasing", "shadowDistance", "shadowCascades",
             "shadowResolution", "shadowProjection", "softParticles", "softVegetation",
             "realtimeReflectionProbes", "billboardsFaceCameraPosition",
-            "particleRaycastBudget", "skinWeights"
+            "particleRaycastBudget", "skinWeights", "streamingMipmapsActive"
         };
-        private static int graphicsRangeIndex = 1;
-        private static int graphicsSharpIndex;
+        private static int graphicsRangeIndex;      // 0 = 4000m default
+        private static int graphicsSharpIndex = 1;  // 1 = 1.15x default
         private static bool graphicsApplied, graphicsAppliedPref, graphicsWarned;
         private static float graphicsNextReapply;
 
@@ -1561,7 +1577,7 @@ namespace QuestMods
         {
             public Camera Cam;
             public float Far, Near;
-            public bool Hdr, Msaa;
+            public bool Hdr, Msaa, Occlusion;
             public CameraClearFlags Flags;
         }
         private static readonly List<CamSnap> camSnaps = new List<CamSnap>();
@@ -1634,6 +1650,10 @@ namespace QuestMods
             graphicsDisabledBehaviours.Clear();
             graphicsDisabledRenderers.Clear();
             camSnaps.Clear();
+            terrainSnaps.Clear();
+            terrainLogged = false;
+            maxDetailLogged = false;
+            maxDetailNext = 0f;
             graphicsNextReapply = 0f;
             if (prefGraphics != null && prefGraphics.Value)
             {
@@ -1717,6 +1737,7 @@ namespace QuestMods
                     Near = cam.nearClipPlane,
                     Hdr = cam.allowHDR,
                     Msaa = cam.allowMSAA,
+                    Occlusion = cam.useOcclusionCulling,
                     Flags = cam.clearFlags
                 });
             }
@@ -1773,11 +1794,11 @@ namespace QuestMods
             // 3. Full texture resolution, longer LODs, better shadows and filtering.
             SetQualityValue("masterTextureLimit", 0);
             SetQualityValue("maximumLODLevel", 0);
-            SetQualityValue("lodBias", 2.5f);
+            SetQualityValue("lodBias", 4f);
             SetQualityValue("anisotropicFiltering", "ForceEnable");
             SetQualityValue("pixelLightCount", 8);
             SetQualityValue("antiAliasing", 4);
-            SetQualityValue("shadowDistance", 160f);
+            SetQualityValue("shadowDistance", 200f);
             SetQualityValue("shadowCascades", 4);
             SetQualityValue("shadowResolution", "VeryHigh");
             SetQualityValue("shadowProjection", "CloseFit");
@@ -1787,6 +1808,9 @@ namespace QuestMods
             SetQualityValue("billboardsFaceCameraPosition", 1);
             SetQualityValue("particleRaycastBudget", 4096);
             SetQualityValue("skinWeights", "FourBones");
+            SetQualityValue("streamingMipmapsActive", 0);
+            try { Texture.SetGlobalAnisotropicFilteringLimits(9, 9); }
+            catch (Exception ex) { MelonLogger.Warning("[Graphics] anisotropy: " + ex.Message); }
 
             // 4. Camera: HDR + MSAA where available and a far plane past the fog.
             int far = graphicsRanges[graphicsRangeIndex];
@@ -1798,6 +1822,9 @@ namespace QuestMods
                     cam.allowHDR = true;
                     cam.allowMSAA = true;
                     if (cam.farClipPlane < far) cam.farClipPlane = far;
+                    // Render more of the world: occlusion culling is what makes
+                    // distant geometry and whole chunks vanish before you reach them.
+                    cam.useOcclusionCulling = false;
                     if (cam.clearFlags == CameraClearFlags.SolidColor) cam.clearFlags = CameraClearFlags.Skybox;
                 }
                 catch (Exception ex) { MelonLogger.Warning("[Graphics] camera: " + ex.Message); }
@@ -1806,6 +1833,9 @@ namespace QuestMods
             // 5. Headset render scale (supersampling) through XR, by reflection.
             SetXrValue("eyeTextureResolutionScale", graphicsSharpness[graphicsSharpIndex]);
             SetXrValue("renderViewportScale", 1f);
+
+            // 6. Far ground and foliage: the real reason distant hills go flat.
+            ApplyTerrainBoost();
         }
 
         // Post-processing / colour grading / film overlays and distance fog
@@ -1933,6 +1963,7 @@ namespace QuestMods
                     snap.Cam.nearClipPlane = snap.Near;
                     snap.Cam.allowHDR = snap.Hdr;
                     snap.Cam.allowMSAA = snap.Msaa;
+                    snap.Cam.useOcclusionCulling = snap.Occlusion;
                     snap.Cam.clearFlags = snap.Flags;
                 }
                 catch { }
@@ -1941,6 +1972,7 @@ namespace QuestMods
             {
                 try { savedSkybox.SetFloat("_Exposure", savedSkyboxExposure); } catch { }
             }
+            RestoreTerrain();
             foreach (var kv in savedQuality) SetQualityValue(kv.Key, kv.Value);
             if (savedXrResolutionScale != null) SetXrValue("eyeTextureResolutionScale", savedXrResolutionScale);
             if (savedXrViewportScale != null) SetXrValue("renderViewportScale", savedXrViewportScale);
@@ -1950,6 +1982,172 @@ namespace QuestMods
             graphicsDisabledBehaviours.Clear();
             graphicsDisabledRenderers.Clear();
             camSnaps.Clear();
+        }
+
+        // --- Far-detail work: terrain, foliage and LOD -------------------------
+        // Terrain and LODGroup are reached by reflection: neither type is
+        // guaranteed to be in this project's reference set.
+        private class TerrainSnap
+        {
+            public UnityEngine.Object T;
+            public object Base, MaxLod, Detail, Tree, Billboard, FullLod, Draw;
+        }
+        private static readonly List<TerrainSnap> terrainSnaps = new List<TerrainSnap>();
+        private static bool terrainLogged, maxDetailLogged;
+        private static float maxDetailNext;
+
+        private static object ReadMember(object obj, string name)
+        {
+            if (obj == null) return null;
+            const BindingFlags f = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            try
+            {
+                Type t = obj.GetType();
+                PropertyInfo p = t.GetProperty(name, f);
+                if (p != null && p.CanRead) return p.GetValue(obj);
+                FieldInfo fi = t.GetField(name, f);
+                if (fi != null) return fi.GetValue(obj);
+            }
+            catch { }
+            return null;
+        }
+
+        private static void WriteMember(object obj, string name, object value)
+        {
+            if (obj == null) return;
+            const BindingFlags f = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            try
+            {
+                Type t = obj.GetType();
+                PropertyInfo p = t.GetProperty(name, f);
+                if (p != null && p.CanWrite)
+                {
+                    object v = value;
+                    if (v != null && v.GetType() != p.PropertyType) v = Convert.ChangeType(v, p.PropertyType);
+                    p.SetValue(obj, v);
+                    return;
+                }
+                FieldInfo fi = t.GetField(name, f);
+                if (fi != null)
+                {
+                    object v = value;
+                    if (v != null && v.GetType() != fi.FieldType) v = Convert.ChangeType(v, fi.FieldType);
+                    fi.SetValue(obj, v);
+                }
+            }
+            catch { }
+        }
+
+        // Distant ground is drawn with a low-res basemap and a cut-down heightmap
+        // LOD, which is why far hills look flat and blurry. Raising both keeps the
+        // real terrain shader and full geometry far out, and the foliage values
+        // keep grass and trees instead of bare ground.
+        private static void ApplyTerrainBoost()
+        {
+            Type terrainType = FindLoadedType("Terrain");
+            if (terrainType == null) return;
+            int changed = 0;
+            try
+            {
+                foreach (UnityEngine.Object o in UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.From(terrainType)))
+                {
+                    if (o == null) continue;
+                    bool known = false;
+                    foreach (TerrainSnap s in terrainSnaps) if (s.T == o) { known = true; break; }
+                    if (!known)
+                    {
+                        terrainSnaps.Add(new TerrainSnap
+                        {
+                            T = o,
+                            Base = ReadMember(o, "basemapDistance"),
+                            MaxLod = ReadMember(o, "heightmapMaximumLOD"),
+                            Detail = ReadMember(o, "detailObjectDistance"),
+                            Tree = ReadMember(o, "treeDistance"),
+                            Billboard = ReadMember(o, "treeBillboardDistance"),
+                            FullLod = ReadMember(o, "treeMaximumFullLODCount"),
+                            Draw = ReadMember(o, "drawTreesAndFoliage")
+                        });
+                    }
+                    WriteMember(o, "basemapDistance", 100000f);
+                    WriteMember(o, "heightmapMaximumLOD", 0);
+                    WriteMember(o, "detailObjectDistance", 450f);
+                    WriteMember(o, "treeDistance", 4000f);
+                    WriteMember(o, "treeBillboardDistance", 2000f);
+                    WriteMember(o, "treeMaximumFullLODCount", 1200);
+                    WriteMember(o, "drawTreesAndFoliage", true);
+                    changed++;
+                }
+            }
+            catch (Exception ex) { MelonLogger.Warning("[Graphics] terrain: " + ex.Message); }
+            if (changed > 0 && !terrainLogged)
+            {
+                terrainLogged = true;
+                MelonLogger.Msg("[Graphics] Terrain boosted on " + changed + " terrain(s): full-res far ground, more grass and trees.");
+            }
+        }
+
+        private static void RestoreTerrain()
+        {
+            foreach (TerrainSnap s in terrainSnaps)
+            {
+                if (s == null || s.T == null) continue;
+                if (s.Base != null) WriteMember(s.T, "basemapDistance", s.Base);
+                if (s.MaxLod != null) WriteMember(s.T, "heightmapMaximumLOD", s.MaxLod);
+                if (s.Detail != null) WriteMember(s.T, "detailObjectDistance", s.Detail);
+                if (s.Tree != null) WriteMember(s.T, "treeDistance", s.Tree);
+                if (s.Billboard != null) WriteMember(s.T, "treeBillboardDistance", s.Billboard);
+                if (s.FullLod != null) WriteMember(s.T, "treeMaximumFullLODCount", s.FullLod);
+                if (s.Draw != null) WriteMember(s.T, "drawTreesAndFoliage", s.Draw);
+            }
+            terrainSnaps.Clear();
+            terrainLogged = false;
+        }
+
+        // Max Detail: force every LODGroup to its highest-detail mesh, so nothing
+        // drops to a low-poly version in the distance. Heavy, so it is its own
+        // toggle and is not needed for the normal overhaul.
+        private static void TickMaxDetail()
+        {
+            if (prefMaxDetail == null || !prefMaxDetail.Value) return;
+            if (Time.time < maxDetailNext) return;
+            maxDetailNext = Time.time + 2f;
+            Type lodType = FindLoadedType("LODGroup");
+            if (lodType == null) return;
+            MethodInfo force = lodType.GetMethod("ForceLOD", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (force == null) return;
+            int shown = 0;
+            try
+            {
+                foreach (UnityEngine.Object o in UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.From(lodType)))
+                {
+                    if (o == null) continue;
+                    try { force.Invoke(o, new object[] { 0 }); shown++; } catch { }
+                }
+            }
+            catch (Exception ex) { MelonLogger.Warning("[Graphics] LOD scan: " + ex.Message); }
+            if (shown > 0 && !maxDetailLogged)
+            {
+                maxDetailLogged = true;
+                MelonLogger.Msg("[Graphics] Max Detail: highest LOD forced on " + shown + " groups.");
+            }
+        }
+
+        private static void RestoreMaxDetail()
+        {
+            Type lodType = FindLoadedType("LODGroup");
+            MethodInfo force = lodType?.GetMethod("ForceLOD", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (force == null) return;
+            try
+            {
+                foreach (UnityEngine.Object o in UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.From(lodType)))
+                {
+                    if (o == null) continue;
+                    try { force.Invoke(o, new object[] { -1 }); } catch { }
+                }
+            }
+            catch (Exception ex) { MelonLogger.Warning("[Graphics] LOD restore: " + ex.Message); }
+            maxDetailLogged = false;
+            MelonLogger.Msg("[Graphics] Max Detail off; normal LOD restored.");
         }
 
         private static void OpenPlayerTPs()
